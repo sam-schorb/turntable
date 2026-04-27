@@ -9,6 +9,99 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function positiveModulo(value, divisor) {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function getScaleSemitones(pitchQuantization) {
+  const scaleSemitones = Array.isArray(pitchQuantization.scaleSemitones)
+    ? pitchQuantization.scaleSemitones
+    : [];
+
+  return scaleSemitones
+    .filter(Number.isFinite)
+    .map((semitone) => positiveModulo(semitone, 12))
+    .filter((semitone, index, semitones) => semitones.indexOf(semitone) === index)
+    .sort((first, second) => first - second);
+}
+
+function nearestScaleSemitone(rawSemitone, pitchQuantization) {
+  const scaleSemitones = getScaleSemitones(pitchQuantization);
+
+  if (scaleSemitones.length === 0) {
+    return rawSemitone;
+  }
+
+  const rootSemitone = Number.isFinite(pitchQuantization.rootSemitone)
+    ? pitchQuantization.rootSemitone
+    : 0;
+  const relativeSemitone = rawSemitone - rootSemitone;
+  const nearestOctave = Math.round(relativeSemitone / 12);
+  let nearest = rawSemitone;
+  let nearestDistance = Infinity;
+
+  for (
+    let octaveOffset = nearestOctave - 1;
+    octaveOffset <= nearestOctave + 1;
+    octaveOffset += 1
+  ) {
+    for (const scaleSemitone of scaleSemitones) {
+      const candidate = rootSemitone + octaveOffset * 12 + scaleSemitone;
+      const distance = Math.abs(candidate - rawSemitone);
+
+      if (
+        distance < nearestDistance ||
+        (distance === nearestDistance &&
+          Math.abs(candidate) < Math.abs(nearest))
+      ) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+  }
+
+  return nearest;
+}
+
+export function quantizePlaybackRateToScale(
+  playbackRate,
+  {
+    pitchQuantization = VOICE_CONFIG.pitchQuantization,
+    minAudiblePlaybackRate = VOICE_CONFIG.minAudiblePlaybackRate,
+    maxEffectivePlaybackRate = AUDIO_CONFIG.maxEffectivePlaybackRate
+  } = {}
+) {
+  if (
+    !pitchQuantization ||
+    pitchQuantization.enabled !== true ||
+    !Number.isFinite(playbackRate)
+  ) {
+    return playbackRate;
+  }
+
+  const absoluteRate = Math.abs(playbackRate);
+
+  if (absoluteRate === 0 || absoluteRate < minAudiblePlaybackRate) {
+    return playbackRate;
+  }
+
+  const referenceRate = Number.isFinite(pitchQuantization.referenceRate)
+    ? Math.max(Number.EPSILON, Math.abs(pitchQuantization.referenceRate))
+    : 1;
+  const rawSemitone = 12 * Math.log2(absoluteRate / referenceRate);
+  const quantizedSemitone = nearestScaleSemitone(
+    rawSemitone,
+    pitchQuantization
+  );
+  const quantizedRate =
+    referenceRate * 2 ** (quantizedSemitone / 12);
+
+  return (
+    Math.sign(playbackRate) *
+    clamp(quantizedRate, 0, maxEffectivePlaybackRate)
+  );
+}
+
 export function validateDescriptorForVoice(descriptor) {
   return Boolean(
     descriptor &&
@@ -98,7 +191,9 @@ export function descriptorToEffectivePlaybackRate(
   transportSnapshot,
   {
     maxEffectivePlaybackRate = AUDIO_CONFIG.maxEffectivePlaybackRate,
-    geometryConfig = GEOMETRY_CONFIG
+    geometryConfig = GEOMETRY_CONFIG,
+    pitchQuantization = VOICE_CONFIG.pitchQuantization,
+    minAudiblePlaybackRate = VOICE_CONFIG.minAudiblePlaybackRate
   } = {}
 ) {
   const actualGlobalSpeed =
@@ -110,11 +205,17 @@ export function descriptorToEffectivePlaybackRate(
     geometryConfig
   );
 
-  return clamp(
+  const continuousRate = clamp(
     actualGlobalSpeed * radialMultiplier,
     -maxEffectivePlaybackRate,
     maxEffectivePlaybackRate
   );
+
+  return quantizePlaybackRateToScale(continuousRate, {
+    pitchQuantization,
+    minAudiblePlaybackRate,
+    maxEffectivePlaybackRate
+  });
 }
 
 export function descriptorToAmplitude(

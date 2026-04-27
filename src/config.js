@@ -94,7 +94,14 @@ export const VOICE_CONFIG = Object.freeze({
   amplitudeStrengthWeight: 0.25,
   minAudibleAmplitude: 0.04,
   fadeOutMs: AUDIO_CONFIG.fadeOutMs,
-  playFullSampleOnTrigger: true
+  playFullSampleOnTrigger: true,
+  pitchQuantization: Object.freeze({
+    enabled: true,
+    scale: "major",
+    rootSemitone: 0,
+    referenceRate: 1,
+    scaleSemitones: Object.freeze([0, 2, 4, 5, 7, 9, 11])
+  })
 });
 
 export const PERFORMANCE_CONFIG = Object.freeze({
