@@ -149,6 +149,10 @@ export function createStartVoiceMessage(voiceSpec) {
     message.voice.startPhase = voiceSpec.startPhase;
   }
 
+  if (voiceSpec.removeAtBoundary === true) {
+    message.voice.removeAtBoundary = true;
+  }
+
   if (Number.isFinite(voiceSpec.phaseFrames)) {
     message.voice.phaseFrames = voiceSpec.phaseFrames;
   }

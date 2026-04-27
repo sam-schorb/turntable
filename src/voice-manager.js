@@ -45,6 +45,17 @@ function shouldStartNewVoice(transportSnapshot) {
   return !transportSnapshot || transportSnapshot.isPaused !== true;
 }
 
+function shouldPlayFullSample(manager) {
+  return manager.config && manager.config.playFullSampleOnTrigger === true;
+}
+
+function shouldReleaseInsteadOfStop(manager, reason) {
+  return (
+    shouldPlayFullSample(manager) &&
+    (reason === "descriptor-disappeared" || reason === "score-cleared")
+  );
+}
+
 function cloneVoiceState(voice) {
   return Object.freeze({
     voiceId: voice.voiceId,
@@ -85,10 +96,13 @@ function createVoiceFromDescriptor(manager, descriptor, transportSnapshot) {
     effectivePlaybackRate,
     manager.config
   );
-  const loopMode = resolveLoopMode({
-    globalLoopMode: manager.globalLoopMode,
-    slotLoopMode: getSlotLoopMode(manager, descriptor.slotIndex)
-  });
+  const loopMode = shouldPlayFullSample(manager)
+    ? "noLoop"
+    : resolveLoopMode({
+        globalLoopMode: manager.globalLoopMode,
+        slotLoopMode: getSlotLoopMode(manager, descriptor.slotIndex)
+      });
+  const playFullSample = shouldPlayFullSample(manager);
   const voiceId = createVoiceId(manager);
   const started = startVoice(manager.audioEngine, {
     voiceId,
@@ -96,8 +110,9 @@ function createVoiceFromDescriptor(manager, descriptor, transportSnapshot) {
     sampleVersion: slot.version,
     effectivePlaybackRate,
     amplitude,
-    loopMode,
-    startPhase: effectivePlaybackRate < 0 ? "end" : "beginning"
+    loopMode: playFullSample ? "noLoop" : loopMode,
+    startPhase: effectivePlaybackRate < 0 ? "end" : "beginning",
+    removeAtBoundary: playFullSample
   });
 
   if (!started) {
@@ -116,7 +131,8 @@ function createVoiceFromDescriptor(manager, descriptor, transportSnapshot) {
     radialCentre: descriptor.radialCentre,
     coverage: descriptor.coverage,
     strength: descriptor.strength,
-    loopMode,
+    loopMode: playFullSample ? "noLoop" : loopMode,
+    playFullSample,
     gateOpen: true,
     lastMatchedAnalysisId: descriptor.analysisId,
     lastDescriptor: descriptor
@@ -144,10 +160,12 @@ function updateVoiceFromDescriptor(manager, voice, descriptor, transportSnapshot
     effectivePlaybackRate,
     manager.config
   );
-  const loopMode = resolveLoopMode({
-    globalLoopMode: manager.globalLoopMode,
-    slotLoopMode: getSlotLoopMode(manager, descriptor.slotIndex)
-  });
+  const loopMode = shouldPlayFullSample(manager)
+    ? "noLoop"
+    : resolveLoopMode({
+        globalLoopMode: manager.globalLoopMode,
+        slotLoopMode: getSlotLoopMode(manager, descriptor.slotIndex)
+      });
   const updates = {};
 
   if (Math.abs(voice.effectivePlaybackRate - effectivePlaybackRate) > 0.000001) {
@@ -190,6 +208,17 @@ function updateVoiceFromDescriptor(manager, voice, descriptor, transportSnapshot
 function stopManagedVoice(manager, voice, reason = "missing-descriptor") {
   if (!manager.activeVoices.has(voice.voiceId)) {
     return false;
+  }
+
+  if (shouldReleaseInsteadOfStop(manager, reason)) {
+    manager.activeVoices.delete(voice.voiceId);
+    manager.stats.released += 1;
+    manager.commandLog.push({
+      type: "release",
+      voiceId: voice.voiceId,
+      reason
+    });
+    return true;
   }
 
   if (isAudioReady(manager)) {
@@ -243,6 +272,7 @@ export function createVoiceManager({
       started: 0,
       updated: 0,
       stopped: 0,
+      released: 0,
       cappedDescriptors: 0,
       ignoredDescriptors: 0,
       sampleReplacements: 0

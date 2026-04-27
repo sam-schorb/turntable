@@ -33,20 +33,20 @@ export const TRANSPORT_CONFIG = Object.freeze({
 
 export const GEOMETRY_CONFIG = Object.freeze({
   playheadAngleTurns: -0.25,
-  discPaddingRatio: 0.08,
-  hubRadiusRatio: 0.14,
-  innerPlayableRadiusRatio: 0.19,
+  discPaddingRatio: 0,
+  hubRadiusRatio: 0.115,
+  innerPlayableRadiusRatio: 0.115,
   radialRateMin: 0.5,
   radialRateMid: 1,
   radialRateMax: 2
 });
 
 export const PLAYHEAD_CONFIG = Object.freeze({
-  strokeWidthMinPx: 9,
-  strokeWidthRatio: 0.035,
+  strokeWidthMinPx: 5,
+  strokeWidthRatio: 0.014,
   coreWidthMinPx: 2,
   coreWidthRatio: 0.009,
-  outerExtensionPx: 12,
+  outerExtensionPx: 0,
   innerExtensionPx: 5,
   coreInsetPx: 2,
   analysisSubsteps: "adaptive",
@@ -58,13 +58,14 @@ export const PLAYHEAD_CONFIG = Object.freeze({
 export const BRUSH_CONFIG = Object.freeze({
   minRadiusRatio: 0.0075,
   maxRadiusRatio: 0.05625,
+  fixedClickRadiusRatio: 0.033,
   speedForMaxRadiusPxPerSecond: 900,
   smoothing: 0.35,
   stampSpacingRatio: 0.65
 });
 
 export const SAMPLE_CONFIG = Object.freeze({
-  maxSampleSeconds: 16,
+  maxSampleSeconds: null,
   acceptedFileTypes: "audio/*",
   defaultBasePath: "/samples/default/"
 });
@@ -92,7 +93,8 @@ export const VOICE_CONFIG = Object.freeze({
   amplitudeCoverageWeight: 0.75,
   amplitudeStrengthWeight: 0.25,
   minAudibleAmplitude: 0.04,
-  fadeOutMs: AUDIO_CONFIG.fadeOutMs
+  fadeOutMs: AUDIO_CONFIG.fadeOutMs,
+  playFullSampleOnTrigger: true
 });
 
 export const PERFORMANCE_CONFIG = Object.freeze({
@@ -112,10 +114,10 @@ export const PERFORMANCE_CONFIG = Object.freeze({
 export const SCORE_PALETTE = Object.freeze([
   null,
   Object.freeze({
-    name: "Coral",
-    family: "coral / red",
+    name: "White",
+    family: "white",
     futureDefaultSample: "Kick",
-    color: "#ff0000"
+    color: "#ffffff"
   }),
   Object.freeze({
     name: "Vermilion orange",

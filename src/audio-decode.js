@@ -95,8 +95,6 @@ export function trimDecodedSample(
   decodedSample,
   maxSampleSeconds = SAMPLE_CONFIG.maxSampleSeconds
 ) {
-  assertPositiveNumber(maxSampleSeconds, "maxSampleSeconds");
-
   if (
     !decodedSample ||
     !Number.isFinite(decodedSample.sampleRate) ||
@@ -105,6 +103,12 @@ export function trimDecodedSample(
   ) {
     throw new TypeError("decodedSample is invalid.");
   }
+
+  if (maxSampleSeconds == null) {
+    return decodedSample;
+  }
+
+  assertPositiveNumber(maxSampleSeconds, "maxSampleSeconds");
 
   const maxFrameCount = Math.floor(
     decodedSample.sampleRate * maxSampleSeconds

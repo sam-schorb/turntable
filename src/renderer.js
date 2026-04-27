@@ -63,7 +63,10 @@ function drawScoreCell(context, geometry, score, index) {
   }
 
   createScoreCellPath(context, geometry, score, angleColumn, radialRow);
-  context.globalAlpha = 0.18 + (strength / 255) * 0.72;
+  context.globalAlpha =
+    paletteEntry.color.toLowerCase() === "#ffffff"
+      ? 1
+      : 0.18 + (strength / 255) * 0.72;
   context.fillStyle = paletteEntry.color;
   context.fill();
   context.globalAlpha = 1;
@@ -534,8 +537,6 @@ export function renderTurntable(
       renderer.stats.directScoreDraws += 1;
     }
   }
-
-  drawTurntableMarkers(context, activeGeometry, snapshot);
 
   return renderer;
 }

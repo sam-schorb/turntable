@@ -68,8 +68,11 @@ export function createSampleManager({
     throw new TypeError("audioContextProvider is required.");
   }
 
-  if (!Number.isFinite(maxSampleSeconds) || maxSampleSeconds <= 0) {
-    throw new RangeError("maxSampleSeconds must be greater than 0.");
+  if (
+    maxSampleSeconds != null &&
+    (!Number.isFinite(maxSampleSeconds) || maxSampleSeconds <= 0)
+  ) {
+    throw new RangeError("maxSampleSeconds must be null or greater than 0.");
   }
 
   return {

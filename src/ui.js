@@ -4,24 +4,17 @@ import {
   sendTransportSnapshot,
   setLoopDefaults,
   syncAllSampleSlots,
-  syncSampleSlot,
   unlockAudio,
 } from './audio-engine.js';
 import { SAMPLE_CONFIG, TRANSPORT_CONFIG } from './config.js';
-import { clientPointToDiscPoint } from './geometry.js';
 import { createLoopState, getLoopStateSnapshot } from './loop-state.js';
 import {
-  beginStroke,
-  cancelStroke,
   clearPaint,
-  clearPaintToolSelection,
   consumeDirtyRegions,
   createPaintController,
-  endStroke,
   setSelectedColour,
   setTool,
-  tickStroke,
-  updateStroke,
+  stampFixedPaintBlob,
 } from './paint.js';
 import {
   analyzePlayhead,
@@ -36,7 +29,6 @@ import {
 import {
   getSampleSlots,
   loadDefaultSamples,
-  replaceSlotSample,
 } from './sample-manager.js';
 import {
   createScoreSync,
@@ -55,19 +47,20 @@ import {
 import {
   createVoiceManager,
   getVoiceState,
-  handleSampleReplacement,
   handleScoreCleared,
   reconcileDescriptors,
   recoverVoicesFromCurrentDescriptors,
 } from './voice-manager.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const DISC_SURFACE = '#ffe6cc';
-const DISC_BOUNDARY = '#000000';
-const DISC_BOUNDARY_WIDTH = 1.5;
-const CENTER_BUTTON_FILL = '#8000ff';
-const PLAYHEAD_STROKE = 'rgba(0, 255, 128, 0.58)';
-const PLAYHEAD_CORE = '#8000ff';
+const EMC_GREEN = '#00ff7f';
+const DISC_SURFACE = EMC_GREEN;
+const DISC_BOUNDARY = 'transparent';
+const DISC_BOUNDARY_WIDTH = 0;
+const CENTER_BUTTON_FILL = 'transparent';
+const PLAYHEAD_STROKE = '#ffffff';
+const PLAYHEAD_CORE = 'transparent';
+const TAU = Math.PI * 2;
 
 function createElement(tagName, options = {}) {
   const element = document.createElement(tagName);
@@ -208,6 +201,35 @@ function createTransportIcon(type) {
   return svg;
 }
 
+function createClearIcon() {
+  const svg = createSvgElement('svg', {
+    className: 'clear-button__icon',
+    testId: 'clear-button-icon',
+  });
+  const slashA = createSvgElement('path');
+  const slashB = createSvgElement('path');
+
+  setSvgAttributes(svg, {
+    viewBox: '0 0 24 24',
+    'aria-hidden': 'true',
+    focusable: 'false',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': 5.5,
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+  });
+  setSvgAttributes(slashA, {
+    d: 'M6.5 6.5 17.5 17.5',
+  });
+  setSvgAttributes(slashB, {
+    d: 'M17.5 6.5 6.5 17.5',
+  });
+  svg.append(slashA, slashB);
+
+  return svg;
+}
+
 function createTurntableVectorChrome() {
   const baseSvg = createSvgElement('svg', {
     className: 'turntable-vector turntable-vector--base',
@@ -216,6 +238,13 @@ function createTurntableVectorChrome() {
   const chromeSvg = createSvgElement('svg', {
     className: 'turntable-vector turntable-vector--chrome',
     testId: 'turntable-vector-chrome',
+  });
+  const blobSvg = createSvgElement('svg', {
+    className: 'turntable-vector turntable-vector--blobs',
+    testId: 'turntable-vector-blobs',
+  });
+  const blobGroup = createSvgElement('g', {
+    className: 'turntable-vector__blob-group',
   });
   const baseDisc = createSvgElement('circle', {
     className: 'turntable-vector__disc',
@@ -233,7 +262,7 @@ function createTurntableVectorChrome() {
     className: 'turntable-vector__hub-base',
   });
 
-  for (const svg of [baseSvg, chromeSvg]) {
+  for (const svg of [baseSvg, blobSvg, chromeSvg]) {
     svg.setAttribute('aria-hidden', 'true');
     svg.setAttribute('focusable', 'false');
     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
@@ -246,7 +275,8 @@ function createTurntableVectorChrome() {
   });
   setSvgAttributes(playhead, {
     stroke: PLAYHEAD_STROKE,
-    'stroke-linecap': 'round',
+    'stroke-dasharray': '6 7',
+    'stroke-linecap': 'butt',
   });
   setSvgAttributes(playheadCore, {
     stroke: PLAYHEAD_CORE,
@@ -259,11 +289,14 @@ function createTurntableVectorChrome() {
   });
   hub.append(hubBase);
   baseSvg.append(baseDisc);
+  blobSvg.append(blobGroup);
   chromeSvg.append(playheadCore, playhead, hub);
 
   return {
     baseSvg,
+    blobSvg,
     chromeSvg,
+    blobGroup,
     baseDisc,
     playhead,
     playheadCore,
@@ -287,11 +320,16 @@ function updateTurntableVectorPhase(chrome, geometry, phaseTurns) {
 
   const normalizedPhaseTurns = ((phaseTurns % 1) + 1) % 1;
   const rotationDegrees = -normalizedPhaseTurns * 360;
+  const platterTransform = `rotate(${rotationDegrees.toFixed(
+    3
+  )} ${geometry.center.x.toFixed(3)} ${geometry.center.y.toFixed(3)})`;
 
   setSvgAttributes(chrome.hub, {
-    transform: `rotate(${rotationDegrees.toFixed(3)} ${geometry.center.x.toFixed(
-      3
-    )} ${geometry.center.y.toFixed(3)})`,
+    transform: platterTransform,
+    'data-phase-turns': normalizedPhaseTurns.toFixed(6),
+  });
+  setSvgAttributes(chrome.blobGroup, {
+    transform: platterTransform,
     'data-phase-turns': normalizedPhaseTurns.toFixed(6),
   });
 }
@@ -302,6 +340,7 @@ function updateTurntableVectorChrome(chrome, geometry) {
   }
 
   updateSvgViewport(chrome.baseSvg, geometry);
+  updateSvgViewport(chrome.blobSvg, geometry);
   updateSvgViewport(chrome.chromeSvg, geometry);
   setSvgCircle(chrome.baseDisc, geometry.center, geometry.outerRadius);
 
@@ -336,6 +375,73 @@ function updateTurntableVectorChrome(chrome, geometry) {
   });
   chrome.hub.removeAttribute('stroke');
   chrome.hub.removeAttribute('fill');
+}
+
+function scorePolarToVectorPoint(geometry, scorePolar) {
+  const radialT = Math.min(1, Math.max(0, scorePolar.radialT));
+  const radius =
+    geometry.innerPlayableRadius +
+    radialT * (geometry.outerRadius - geometry.innerPlayableRadius);
+  const angleRadians =
+    (geometry.playheadAngleTurns + scorePolar.angleTurns) * TAU;
+
+  return {
+    x: geometry.center.x + Math.cos(angleRadians) * radius,
+    y: geometry.center.y + Math.sin(angleRadians) * radius,
+  };
+}
+
+function updateVectorBlobElement(circle, blob, geometry) {
+  const point = scorePolarToVectorPoint(geometry, blob.scorePolar);
+
+  setSvgAttributes(circle, {
+    cx: point.x,
+    cy: point.y,
+    r: geometry.outerRadius * blob.radiusRatio,
+    fill: blob.colour,
+  });
+}
+
+function updateVectorBlobLayer(chrome, blobs, geometry) {
+  if (!chrome || !geometry) {
+    return;
+  }
+
+  updateSvgViewport(chrome.blobSvg, geometry);
+
+  for (const blob of blobs) {
+    updateVectorBlobElement(blob.element, blob, geometry);
+  }
+}
+
+function appendVectorBlob(chrome, blobs, stampResult, geometry) {
+  if (
+    !chrome ||
+    !geometry ||
+    !stampResult.scorePolar ||
+    !Number.isFinite(stampResult.brushRadius)
+  ) {
+    return;
+  }
+
+  const circle = createSvgElement('circle', {
+    className: 'turntable-vector__blob',
+  });
+  const blob = {
+    element: circle,
+    scorePolar: stampResult.scorePolar,
+    radiusRatio: stampResult.brushRadius / geometry.outerRadius,
+    colour: '#ffffff',
+  };
+
+  updateVectorBlobElement(circle, blob, geometry);
+  chrome.blobGroup.append(circle);
+  blobs.push(blob);
+}
+
+function clearVectorBlobs(chrome, blobs) {
+  blobs.length = 0;
+  chrome.blobGroup.replaceChildren();
 }
 
 function nowSeconds() {
@@ -376,7 +482,7 @@ function createCenterTransportButton() {
         return;
       }
 
-      const diameter = geometry.innerPlayableRadius * 2;
+      const diameter = geometry.innerPlayableRadius * 2.12;
       playButton.style.left = `${geometry.center.x}px`;
       playButton.style.top = `${geometry.center.y}px`;
       playButton.style.width = `${diameter}px`;
@@ -384,9 +490,9 @@ function createCenterTransportButton() {
     },
     updatePhase(phaseTurns) {
       const normalizedPhaseTurns = ((phaseTurns % 1) + 1) % 1;
-      const rotationDegrees = -normalizedPhaseTurns * 360;
+      const rotationDegrees = 0;
 
-      iconShell.style.transform = `rotate(${rotationDegrees.toFixed(3)}deg)`;
+      iconShell.style.transform = 'none';
       playButton.dataset.phaseTurns = normalizedPhaseTurns.toFixed(6);
       playButton.dataset.rotationDegrees = rotationDegrees.toFixed(3);
     },
@@ -416,10 +522,6 @@ function createTransportControls(transport) {
   const sliderGroup = createElement('label', {
     className: 'speed-control',
   });
-  const sliderHeader = createElement('span', {
-    className: 'speed-control__header',
-    text: 'Speed',
-  });
   const slider = createElement('input', {
     className: 'speed-control__slider',
     testId: 'speed-slider',
@@ -436,9 +538,9 @@ function createTransportControls(transport) {
     className: 'speed-control__thumb',
     testId: 'speed-thumb',
   });
-  const tickList = createElement('div', {
-    className: 'speed-control__ticks',
-    testId: 'speed-ticks',
+  const clearButton = createElement('button', {
+    className: 'clear-button',
+    testId: 'clear-paint',
   });
 
   slider.type = 'range';
@@ -449,23 +551,17 @@ function createTransportControls(transport) {
   slider.setAttribute('aria-label', 'Signed global speed');
   updateSpeedSliderFill(slider);
 
-  for (const tick of [+4, +2, +1, 0, -1, -2, -4]) {
-    tickList.append(
-      createElement('span', {
-        className:
-          tick === 0 ? 'speed-control__tick is-zero' : 'speed-control__tick',
-        text: tick > 0 ? `+${tick}` : String(tick),
-      })
-    );
-  }
-
+  clearButton.type = 'button';
+  clearButton.setAttribute('aria-label', 'Clear');
+  clearButton.append(createClearIcon());
   sliderFrame.append(sliderTrack, sliderThumb, slider);
-  sliderGroup.append(sliderHeader, sliderFrame, tickList);
-  controls.append(sliderGroup);
+  sliderGroup.append(sliderFrame);
+  controls.append(sliderGroup, clearButton);
 
   return {
     element: controls,
     slider,
+    clearButton,
   };
 }
 
@@ -780,21 +876,18 @@ export function mountAppShell(root, context) {
   const loopState = createLoopState({
     slotLoopModes: getSampleSlots(sampleManager).map(slot => slot.slotLoopMode),
   });
-  const paintControls = createSampleControls(
-    pointerEventsSupported,
-    sampleManager
-  );
   const transportControls = createTransportControls(transport);
   const centerTransportButton = createCenterTransportButton();
 
   visual.append(
     vectorChrome.baseSvg,
     canvas,
+    vectorChrome.blobSvg,
     vectorChrome.chromeSvg,
     centerTransportButton.element
   );
   surface.append(visual);
-  workspace.append(paintControls.element, surface, transportControls.element);
+  workspace.append(surface, transportControls.element);
 
   main.append(workspace);
   app.append(main);
@@ -822,11 +915,13 @@ export function mountAppShell(root, context) {
     canvas,
     getGeometry: () => renderer.geometry,
   });
+  setSelectedColour(paintController, 1);
+  setTool(paintController, 'paint');
   let animationFrameId = null;
   let audioUnlockPromise = null;
   let lastRenderedKey = null;
-  let lastPaintControlsSignature = null;
   let lastTransportControlsSignature = null;
+  const visualBlobs = [];
 
   function getCurrentDescriptorPayload(snapshot) {
     return renderer.geometry
@@ -838,6 +933,11 @@ export function mountAppShell(root, context) {
     canvas.dataset.transportPhase = snapshot.phaseTurns.toFixed(6);
     canvas.dataset.transportPlaying = snapshot.isPlaying ? 'true' : 'false';
     centerTransportButton.updatePhase(snapshot.phaseTurns);
+    updateTurntableVectorPhase(
+      vectorChrome,
+      renderer.geometry,
+      snapshot.phaseTurns
+    );
   }
 
   function updateTransportControlsIfNeeded(snapshot, force = false) {
@@ -853,77 +953,7 @@ export function mountAppShell(root, context) {
     }
   }
 
-  function updatePaintControlsIfNeeded(
-    force = false,
-    voiceState = getVoiceState(voiceManager)
-  ) {
-    const signature = createPaintControlsSignature(
-      paintController,
-      sampleManager,
-      voiceState,
-      loopState
-    );
-
-    if (force || signature !== lastPaintControlsSignature) {
-      paintControls.update(
-        paintController,
-        sampleManager,
-        voiceState,
-        loopState
-      );
-      lastPaintControlsSignature = signature;
-    }
-  }
-
-  function clearPaintSelectionFromBackground(event) {
-    if (event.button !== undefined && event.button !== 0) {
-      return;
-    }
-
-    const target =
-      event.target instanceof Element ? event.target : event.currentTarget;
-
-    if (!target || target.closest('[data-testid="transport-play"]')) {
-      return;
-    }
-
-    if (
-      target.closest(
-        '[data-testid="paint-controls"], [data-testid="transport-controls"]'
-      )
-    ) {
-      return;
-    }
-
-    const turntableVisual = target.closest('[data-testid="turntable-visual"]');
-
-    if (turntableVisual) {
-      if (!renderer.geometry) {
-        return;
-      }
-
-      const discPoint = clientPointToDiscPoint(
-        canvas,
-        event.clientX,
-        event.clientY,
-        renderer.geometry
-      );
-
-      if (discPoint.radius <= renderer.geometry.outerRadius) {
-        return;
-      }
-    }
-
-    if (
-      paintController.tool === 'none' &&
-      paintController.selectedColourIndex == null
-    ) {
-      return;
-    }
-
-    clearPaintToolSelection(paintController);
-    updatePaintControlsIfNeeded(true);
-  }
+  function updatePaintControlsIfNeeded() {}
 
   function createRenderedKey(snapshot) {
     const geometry = renderer.geometry;
@@ -1046,10 +1076,6 @@ export function mountAppShell(root, context) {
   function renderFrame() {
     const frameNow = nowSeconds();
 
-    if (paintController.activeStroke) {
-      tickStroke(paintController, frameNow);
-    }
-
     const snapshot = getTransportSnapshot(transport, frameNow);
     const dirtyRegions = consumeDirtyRegions(paintController);
     const audioState = getAudioEngineState(audioEngine);
@@ -1089,9 +1115,7 @@ export function mountAppShell(root, context) {
         snapshot.phaseTurns
       );
       renderTurntable(renderer, {
-        score,
         transport: snapshot,
-        dirtyRegions,
       });
       lastRenderedKey = createRenderedKey(snapshot);
     }
@@ -1111,6 +1135,7 @@ export function mountAppShell(root, context) {
 
     resizeRenderer(renderer);
     updateTurntableVectorChrome(vectorChrome, renderer.geometry);
+    updateVectorBlobLayer(vectorChrome, visualBlobs, renderer.geometry);
     centerTransportButton.updateGeometry(renderer.geometry);
     updateTurntableVectorPhase(
       vectorChrome,
@@ -1119,7 +1144,6 @@ export function mountAppShell(root, context) {
     );
     updateTransportDataset(snapshot);
     renderTurntable(renderer, {
-      score,
       transport: snapshot,
     });
     lastRenderedKey = createRenderedKey(snapshot);
@@ -1133,63 +1157,23 @@ export function mountAppShell(root, context) {
       await ensureAudioReadyFromGesture();
       requestResume(transport, nowSeconds());
       reconcileCurrentVisualState();
-      updatePaintControlsIfNeeded(true);
     }
   });
-  app.addEventListener('pointerdown', clearPaintSelectionFromBackground);
   transportControls.slider.addEventListener('input', () => {
     updateTransport(transport, nowSeconds());
     setTargetGlobalSpeed(transport, Number(transportControls.slider.value));
     updateSpeedSliderFill(transportControls.slider);
   });
-  for (const [colourIndex, button] of paintControls.swatchButtons.entries()) {
-    button.addEventListener('click', () => {
-      setSelectedColour(paintController, colourIndex);
-      setTool(paintController, 'paint');
-      updatePaintControlsIfNeeded(true);
-    });
-  }
-  paintControls.eraserButton.addEventListener('click', () => {
-    setTool(paintController, 'erase');
-    updatePaintControlsIfNeeded(true);
-  });
-  paintControls.clearButton.addEventListener('click', () => {
+  transportControls.clearButton.addEventListener('click', () => {
     clearPaint(paintController);
+    clearVectorBlobs(vectorChrome, visualBlobs);
     handleScoreCleared(voiceManager);
-    updatePaintControlsIfNeeded(true);
     resizeAndRender();
   });
-  for (const [slotIndex, fileInput] of paintControls.fileInputs.entries()) {
-    fileInput.addEventListener('click', event => {
-      event.stopPropagation();
-    });
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files && fileInput.files[0];
-
-      const result = await replaceSlotSample(sampleManager, slotIndex, file);
-      if (result.type === 'sample-replaced') {
-        handleSampleReplacement(voiceManager, slotIndex, result.newVersion);
-      }
-      syncSampleSlot(audioEngine, slotIndex);
-      if (
-        result.type === 'sample-replaced' &&
-        getAudioEngineState(audioEngine).status === 'ready'
-      ) {
-        reconcileDescriptors(
-          voiceManager,
-          voiceManager.lastDescriptorSnapshot,
-          voiceManager.lastTransportSnapshot ||
-            getTransportSnapshot(transport, nowSeconds())
-        );
-      }
-      fileInput.value = '';
-      updatePaintControlsIfNeeded(true);
-    });
-  }
 
   if (pointerEventsSupported) {
     canvas.addEventListener('pointerdown', event => {
-      const result = beginStroke(
+      const result = stampFixedPaintBlob(
         paintController,
         {
           pointerId: event.pointerId,
@@ -1200,67 +1184,12 @@ export function mountAppShell(root, context) {
         nowSeconds()
       );
 
-      if (!result.started) {
+      if (!result.stamped) {
         return;
       }
 
       event.preventDefault();
-
-      if (typeof canvas.setPointerCapture === 'function') {
-        canvas.dataset.pointerCaptureRequested = 'true';
-
-        try {
-          canvas.setPointerCapture(event.pointerId);
-          canvas.dataset.pointerCaptureActive = 'true';
-        } catch {
-          canvas.dataset.pointerCaptureActive = 'false';
-        }
-      }
-    });
-    canvas.addEventListener('pointermove', event => {
-      if (
-        !paintController.activeStroke ||
-        paintController.activeStroke.pointerId !== event.pointerId
-      ) {
-        return;
-      }
-
-      event.preventDefault();
-      updateStroke(
-        paintController,
-        {
-          pointerId: event.pointerId,
-          clientX: event.clientX,
-          clientY: event.clientY,
-          canvas,
-        },
-        nowSeconds()
-      );
-    });
-    canvas.addEventListener('pointerup', event => {
-      if (
-        !paintController.activeStroke ||
-        paintController.activeStroke.pointerId !== event.pointerId
-      ) {
-        return;
-      }
-
-      event.preventDefault();
-      endStroke(paintController, { pointerId: event.pointerId }, nowSeconds());
-
-      if (typeof canvas.releasePointerCapture === 'function') {
-        try {
-          canvas.releasePointerCapture(event.pointerId);
-        } catch {
-          // Synthetic browser-test pointers may not establish native capture.
-        }
-
-        canvas.dataset.pointerCaptureActive = 'false';
-      }
-    });
-    canvas.addEventListener('pointercancel', event => {
-      cancelStroke(paintController, { pointerId: event.pointerId });
-      canvas.dataset.pointerCaptureActive = 'false';
+      appendVectorBlob(vectorChrome, visualBlobs, result, renderer.geometry);
     });
   }
 
@@ -1282,9 +1211,7 @@ export function mountAppShell(root, context) {
   window.addEventListener('focus', recoverAudioAfterInterruption);
 
   resizeAndRender();
-  updatePaintControlsIfNeeded(true);
   const defaultLoadPromise = loadDefaultSamples(sampleManager).finally(() => {
-    updatePaintControlsIfNeeded(true);
     syncAllSampleSlots(audioEngine);
     setLoopDefaults(audioEngine, getLoopStateSnapshot(loopState));
   });

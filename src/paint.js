@@ -405,6 +405,65 @@ export function beginStroke(controller, pointerState, nowSeconds) {
   };
 }
 
+export function stampFixedPaintBlob(controller, pointerState, nowSeconds) {
+  if (
+    controller.tool === "none" ||
+    (controller.tool === "paint" &&
+      !Number.isInteger(controller.selectedColourIndex))
+  ) {
+    return {
+      stamped: false,
+      reason: "no_paint_tool_selected"
+    };
+  }
+
+  const resolvedNowSeconds = nowSecondsFallback(nowSeconds);
+  const pointerSample = createPointerSample(
+    controller,
+    pointerState,
+    resolvedNowSeconds
+  );
+
+  if (!pointerSample) {
+    return {
+      stamped: false,
+      reason: "missing_geometry"
+    };
+  }
+
+  const scorePolar = pointerSampleToScorePolar(
+    controller,
+    pointerSample,
+    resolvedNowSeconds
+  );
+
+  if (!scorePolar) {
+    return {
+      stamped: false,
+      reason: "outside_playable_annulus"
+    };
+  }
+
+  const geometry = getGeometry(controller);
+  const radiusRatio =
+    controller.brushConfig.fixedClickRadiusRatio ??
+    controller.brushConfig.minRadiusRatio;
+  const brushRadius = geometry.outerRadius * radiusRatio;
+  const stampResult = stampScorePolar(controller, scorePolar, brushRadius);
+
+  controller.brushRadius = brushRadius;
+  controller.pointerSpeed = 0;
+
+  return {
+    stamped: true,
+    mutationCount: stampResult.mutationCount,
+    dirtyRegion: stampResult.dirtyRegion,
+    scorePolar,
+    brushRadius,
+    colourIndex: controller.selectedColourIndex
+  };
+}
+
 export function updateStroke(controller, pointerState, nowSeconds) {
   const stroke = controller.activeStroke;
 

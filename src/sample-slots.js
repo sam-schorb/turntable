@@ -6,8 +6,8 @@ const DEFAULT_SLOT_SPECS = Object.freeze([
   Object.freeze({
     slotIndex: 0,
     colourIndex: 1,
-    defaultName: "Kick",
-    defaultPath: `${SAMPLE_CONFIG.defaultBasePath}kick.wav`
+    defaultName: "Music Box",
+    defaultPath: "/samples/EMC/music-box.wav"
   }),
   Object.freeze({
     slotIndex: 1,

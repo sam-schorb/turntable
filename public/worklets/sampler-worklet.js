@@ -80,6 +80,7 @@ function createVoice(voiceSpec, sample) {
     targetAmplitude: amplitude,
     smoothedAmplitude: amplitude,
     loopMode: normalizeLoopMode(voiceSpec.loopMode),
+    removeAtBoundary: voiceSpec.removeAtBoundary === true,
     gateOpen: voiceSpec.gateOpen !== false,
     silentAtBoundary: false,
     boundarySide: null,
@@ -392,6 +393,9 @@ class SamplerWorkletProcessor extends AudioWorkletProcessor {
         voice.silentAtBoundary = true;
         voice.boundarySide = "end";
         this.postVoiceEnded(voice, "boundary");
+        if (voice.removeAtBoundary) {
+          this.voices.delete(voice.voiceId);
+        }
       }
     } else if (voice.phaseFrames <= 0) {
       voice.phaseFrames = 0;
@@ -400,6 +404,9 @@ class SamplerWorkletProcessor extends AudioWorkletProcessor {
         voice.silentAtBoundary = true;
         voice.boundarySide = "start";
         this.postVoiceEnded(voice, "boundary");
+        if (voice.removeAtBoundary) {
+          this.voices.delete(voice.voiceId);
+        }
       }
     }
   }
@@ -519,6 +526,10 @@ class SamplerWorkletProcessor extends AudioWorkletProcessor {
             voice.endedPosted = endedPosted;
             this.postVoiceEnded(voice, "boundary");
             endedPosted = voice.endedPosted;
+            if (voice.removeAtBoundary) {
+              this.voices.delete(voice.voiceId);
+              voiceDeleted = true;
+            }
           }
         } else if (phaseFrames <= 0) {
           phaseFrames = 0;
@@ -529,8 +540,16 @@ class SamplerWorkletProcessor extends AudioWorkletProcessor {
             voice.endedPosted = endedPosted;
             this.postVoiceEnded(voice, "boundary");
             endedPosted = voice.endedPosted;
+            if (voice.removeAtBoundary) {
+              this.voices.delete(voice.voiceId);
+              voiceDeleted = true;
+            }
           }
         }
+      }
+
+      if (voiceDeleted) {
+        break;
       }
 
       if (silentAtBoundary) {
