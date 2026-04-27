@@ -66,7 +66,7 @@ export const BRUSH_CONFIG = Object.freeze({
 export const SAMPLE_CONFIG = Object.freeze({
   maxSampleSeconds: 16,
   acceptedFileTypes: "audio/*",
-  defaultBasePath: "/samples/"
+  defaultBasePath: "/samples/default/"
 });
 
 export const AUDIO_CONFIG = Object.freeze({
