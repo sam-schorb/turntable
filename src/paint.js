@@ -464,6 +464,67 @@ export function stampFixedPaintBlob(controller, pointerState, nowSeconds) {
   };
 }
 
+export function stampFixedScoreBlob(controller, scorePolar) {
+  if (
+    controller.tool === "none" ||
+    (controller.tool === "paint" &&
+      !Number.isInteger(controller.selectedColourIndex))
+  ) {
+    return {
+      stamped: false,
+      reason: "no_paint_tool_selected"
+    };
+  }
+
+  const geometry = getGeometry(controller);
+
+  if (!geometry) {
+    return {
+      stamped: false,
+      reason: "missing_geometry"
+    };
+  }
+
+  if (
+    !scorePolar ||
+    !Number.isFinite(scorePolar.angleTurns) ||
+    !Number.isFinite(scorePolar.radialT) ||
+    scorePolar.radialT < 0 ||
+    scorePolar.radialT > 1
+  ) {
+    return {
+      stamped: false,
+      reason: "invalid_score_polar"
+    };
+  }
+
+  const normalizedScorePolar = {
+    angleTurns: normalizeTurns(scorePolar.angleTurns),
+    radialT: scorePolar.radialT
+  };
+  const radiusRatio =
+    controller.brushConfig.fixedClickRadiusRatio ??
+    controller.brushConfig.minRadiusRatio;
+  const brushRadius = geometry.outerRadius * radiusRatio;
+  const stampResult = stampScorePolar(
+    controller,
+    normalizedScorePolar,
+    brushRadius
+  );
+
+  controller.brushRadius = brushRadius;
+  controller.pointerSpeed = 0;
+
+  return {
+    stamped: true,
+    mutationCount: stampResult.mutationCount,
+    dirtyRegion: stampResult.dirtyRegion,
+    scorePolar: normalizedScorePolar,
+    brushRadius,
+    colourIndex: controller.selectedColourIndex
+  };
+}
+
 export function updateStroke(controller, pointerState, nowSeconds) {
   const stroke = controller.activeStroke;
 

@@ -15,6 +15,7 @@ import {
   setSelectedColour,
   setTool,
   stampFixedPaintBlob,
+  stampFixedScoreBlob,
 } from './paint.js';
 import {
   analyzePlayhead,
@@ -61,6 +62,12 @@ const CENTER_BUTTON_FILL = 'transparent';
 const PLAYHEAD_STROKE = '#ffffff';
 const PLAYHEAD_CORE = 'transparent';
 const TAU = Math.PI * 2;
+const INITIAL_BLOB_CONFIG = Object.freeze({
+  minAngleTurns: 0,
+  maxAngleTurns: 1 / 6,
+  minRadialT: 0.07,
+  maxRadialT: 0.93,
+});
 
 function createElement(tagName, options = {}) {
   const element = document.createElement(tagName);
@@ -442,6 +449,25 @@ function appendVectorBlob(chrome, blobs, stampResult, geometry) {
 function clearVectorBlobs(chrome, blobs) {
   blobs.length = 0;
   chrome.blobGroup.replaceChildren();
+}
+
+function randomInRange(random, min, max) {
+  return min + (max - min) * random();
+}
+
+function createInitialRandomBlobScorePolar(random = Math.random) {
+  return {
+    angleTurns: randomInRange(
+      random,
+      INITIAL_BLOB_CONFIG.minAngleTurns,
+      INITIAL_BLOB_CONFIG.maxAngleTurns
+    ),
+    radialT: randomInRange(
+      random,
+      INITIAL_BLOB_CONFIG.minRadialT,
+      INITIAL_BLOB_CONFIG.maxRadialT
+    ),
+  };
 }
 
 function nowSeconds() {
@@ -921,6 +947,7 @@ export function mountAppShell(root, context) {
   let audioUnlockPromise = null;
   let lastRenderedKey = null;
   let lastTransportControlsSignature = null;
+  let initialBlobSeeded = false;
   const visualBlobs = [];
 
   function getCurrentDescriptorPayload(snapshot) {
@@ -1148,6 +1175,25 @@ export function mountAppShell(root, context) {
     });
     lastRenderedKey = createRenderedKey(snapshot);
     updateTransportControlsIfNeeded(snapshot, true);
+    seedInitialBlobIfNeeded();
+  }
+
+  function seedInitialBlobIfNeeded() {
+    if (initialBlobSeeded || !renderer.geometry) {
+      return;
+    }
+
+    initialBlobSeeded = true;
+    const result = stampFixedScoreBlob(
+      paintController,
+      createInitialRandomBlobScorePolar()
+    );
+
+    if (!result.stamped) {
+      return;
+    }
+
+    appendVectorBlob(vectorChrome, visualBlobs, result, renderer.geometry);
   }
 
   centerTransportButton.playButton.addEventListener('click', async () => {
