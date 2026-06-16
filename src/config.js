@@ -28,7 +28,9 @@ export const TRANSPORT_CONFIG = Object.freeze({
   defaultIsPlaying: false,
   pauseDecelerationMs: 500,
   resumeAccelerationMs: 350,
-  nearZeroSpeedThreshold: 0.02
+  nearZeroSpeedThreshold: 0.02,
+  handVelocitySampleWindowMs: 60,
+  handVelocityDeadZoneSpeed: 0.02
 });
 
 export const GEOMETRY_CONFIG = Object.freeze({

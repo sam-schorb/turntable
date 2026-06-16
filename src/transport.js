@@ -1,6 +1,6 @@
 import { TRANSPORT_CONFIG } from "./config.js";
 
-const DEFAULT_HAND_VELOCITY_SAMPLE_WINDOW_SECONDS = 0.12;
+const DEFAULT_HAND_VELOCITY_SAMPLE_WINDOW_SECONDS = 0.06;
 const DEFAULT_HAND_VELOCITY_MIN_PHASE_DELTA_TURNS = 0.000001;
 
 function assertFiniteNumber(value, name) {
@@ -195,15 +195,7 @@ function appendHandVelocitySample(transport, seconds, phaseTurns) {
   }
 }
 
-function resolveHandVelocity(transport) {
-  const samples = transport.handVelocitySamples;
-
-  if (samples.length < 2) {
-    return 0;
-  }
-
-  const first = samples[0];
-  const latest = samples[samples.length - 1];
+function resolveVelocityFromSamples(transport, first, latest) {
   const elapsedSeconds = latest.seconds - first.seconds;
 
   if (elapsedSeconds <= 0) {
@@ -216,11 +208,57 @@ function resolveHandVelocity(transport) {
     return 0;
   }
 
-  return clamp(
-    (phaseDeltaTurns * transport.baseRevolutionSeconds) / elapsedSeconds,
-    transport.globalSpeedMin,
-    transport.globalSpeedMax
+  const rawSpeed =
+    (phaseDeltaTurns * transport.baseRevolutionSeconds) / elapsedSeconds;
+
+  if (Math.abs(rawSpeed) < transport.handVelocityDeadZoneSpeed) {
+    return 0;
+  }
+
+  return clamp(rawSpeed, transport.globalSpeedMin, transport.globalSpeedMax);
+}
+
+function signsDiffer(first, second) {
+  return (
+    Number.isFinite(first) &&
+    Number.isFinite(second) &&
+    first !== 0 &&
+    second !== 0 &&
+    Math.sign(first) !== Math.sign(second)
   );
+}
+
+function resolveHandVelocity(transport) {
+  const samples = transport.handVelocitySamples;
+
+  if (samples.length < 2) {
+    return 0;
+  }
+
+  const first = samples[0];
+  const previous = samples[samples.length - 2];
+  const latest = samples[samples.length - 1];
+  const latestSegmentSpeed = resolveVelocityFromSamples(
+    transport,
+    previous,
+    latest
+  );
+
+  if (latestSegmentSpeed === 0) {
+    return 0;
+  }
+
+  const smoothedSpeed = resolveVelocityFromSamples(
+    transport,
+    first,
+    latest
+  );
+
+  if (smoothedSpeed === 0 || signsDiffer(latestSegmentSpeed, smoothedSpeed)) {
+    return latestSegmentSpeed;
+  }
+
+  return smoothedSpeed;
 }
 
 function syncTransportCompatibilityFields(transport) {
@@ -256,11 +294,40 @@ export function createTransport(config = {}) {
     config.resumeAccelerationMs ?? TRANSPORT_CONFIG.resumeAccelerationMs,
     "resumeAccelerationMs"
   );
+  const handVelocitySampleWindowSeconds =
+    config.handVelocitySampleWindowSeconds ??
+    millisecondsToSeconds(
+      config.handVelocitySampleWindowMs ??
+        TRANSPORT_CONFIG.handVelocitySampleWindowMs ??
+        DEFAULT_HAND_VELOCITY_SAMPLE_WINDOW_SECONDS * 1000,
+      "handVelocitySampleWindowMs"
+    );
+  const handVelocityDeadZoneSpeed =
+    config.handVelocityDeadZoneSpeed ??
+    TRANSPORT_CONFIG.handVelocityDeadZoneSpeed ??
+    (config.nearZeroSpeedThreshold ?? TRANSPORT_CONFIG.nearZeroSpeedThreshold);
 
   assertFiniteNumber(baseRevolutionSeconds, "baseRevolutionSeconds");
+  assertFiniteNumber(
+    handVelocitySampleWindowSeconds,
+    "handVelocitySampleWindowSeconds"
+  );
+  assertFiniteNumber(handVelocityDeadZoneSpeed, "handVelocityDeadZoneSpeed");
 
   if (baseRevolutionSeconds <= 0) {
     throw new RangeError("baseRevolutionSeconds must be greater than 0.");
+  }
+
+  if (handVelocitySampleWindowSeconds < 0) {
+    throw new RangeError(
+      "handVelocitySampleWindowSeconds must be greater than or equal to 0."
+    );
+  }
+
+  if (handVelocityDeadZoneSpeed < 0) {
+    throw new RangeError(
+      "handVelocityDeadZoneSpeed must be greater than or equal to 0."
+    );
   }
 
   if (globalSpeedMin >= globalSpeedMax) {
@@ -289,9 +356,8 @@ export function createTransport(config = {}) {
     resumeAccelerationSeconds,
     nearZeroSpeedThreshold:
       config.nearZeroSpeedThreshold ?? TRANSPORT_CONFIG.nearZeroSpeedThreshold,
-    handVelocitySampleWindowSeconds:
-      config.handVelocitySampleWindowSeconds ??
-      DEFAULT_HAND_VELOCITY_SAMPLE_WINDOW_SECONDS,
+    handVelocitySampleWindowSeconds,
+    handVelocityDeadZoneSpeed,
     handVelocityMinPhaseDeltaTurns:
       config.handVelocityMinPhaseDeltaTurns ??
       DEFAULT_HAND_VELOCITY_MIN_PHASE_DELTA_TURNS,

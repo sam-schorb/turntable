@@ -374,6 +374,21 @@ describe("signed transport phase model", () => {
     assertNearlyEqual(transport.phaseTurns, releasePhase);
   });
 
+  it("release with motor off settles immediately to zero speed", () => {
+    const transport = createTransport();
+
+    beginPlatterGrab(transport, 0.25, 0);
+    updatePlatterGrab(transport, 0.125, 0.25);
+    endPlatterGrab(transport, 0.25);
+    const snapshot = getTransportSnapshot(transport, 0.5);
+
+    assert.equal(snapshot.handGrabActive, false);
+    assert.equal(snapshot.actualGlobalSpeed, 0);
+    assert.equal(snapshot.motionSource, "idle");
+    assert.equal(snapshot.canStartVoices, false);
+    assert.equal(snapshot.isRamping, false);
+  });
+
   it("release while motor enabled continues motor motion from dragged phase", () => {
     const transport = createTransport({
       defaultIsPlaying: true,
@@ -393,6 +408,25 @@ describe("signed transport phase model", () => {
     assert.equal(transport.motionSource, "motor");
     assert.equal(transport.actualGlobalSpeed, 2);
     assertNearlyEqual(transport.phaseTurns, draggedPhase + 0.25);
+  });
+
+  it("release with motor on returns immediately to the motor target speed", () => {
+    const transport = createTransport({
+      defaultIsPlaying: true,
+      defaultTargetGlobalSpeed: 3
+    });
+
+    updateTransport(transport, 0);
+    beginPlatterGrab(transport, 0.25, 0);
+    updatePlatterGrab(transport, 0.125, 0.5);
+    endPlatterGrab(transport, 0.5);
+    const snapshot = getTransportSnapshot(transport, 0.5);
+
+    assert.equal(snapshot.handGrabActive, false);
+    assert.equal(snapshot.motorEnabled, true);
+    assert.equal(snapshot.motionSource, "motor");
+    assert.equal(snapshot.actualGlobalSpeed, 3);
+    assert.equal(snapshot.canStartVoices, true);
   });
 
   it("target speed is unchanged by hand dragging", () => {
@@ -530,6 +564,47 @@ describe("signed transport phase model", () => {
     updatePlatterGrab(transport, 0, 0.001);
 
     assert.equal(transport.actualGlobalSpeed, 4);
+  });
+
+  it("negative extreme hand velocity clamps while preserving sign", () => {
+    const transport = createTransport();
+
+    beginPlatterGrab(transport, 0.25, 0);
+    updatePlatterGrab(transport, 0.74, 0.001);
+
+    assert.equal(transport.actualGlobalSpeed, -4);
+  });
+
+  it("jitter below the hand velocity dead zone settles to zero speed", () => {
+    const transport = createTransport({
+      defaultPhaseTurns: 0.5,
+      handVelocityDeadZoneSpeed: 0.02
+    });
+
+    beginPlatterGrab(transport, 0.5, 0);
+    updatePlatterGrab(transport, 0.49999, 0.1);
+
+    assert.equal(transport.handGrabActive, true);
+    assert.equal(transport.canStartVoices, true);
+    assert.equal(transport.actualGlobalSpeed, 0);
+  });
+
+  it("speed smoothing does not hide a real direction reversal near zero", () => {
+    const transport = createTransport({
+      handVelocitySampleWindowSeconds: 0.2,
+      handVelocityDeadZoneSpeed: 0.02
+    });
+
+    beginPlatterGrab(transport, 0.25, 0);
+    updatePlatterGrab(transport, 0.125, 0.05);
+    assert.ok(transport.actualGlobalSpeed > 0);
+
+    updatePlatterGrab(transport, 0.126, 0.06);
+
+    assert.ok(
+      transport.actualGlobalSpeed < 0,
+      `expected reversed speed, got ${transport.actualGlobalSpeed}`
+    );
   });
 
   it("tiny angle jitter produces near-zero hand speed", () => {
