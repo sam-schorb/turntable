@@ -118,8 +118,39 @@ function integrateRampSpeed(ramp, startSeconds, endSeconds) {
   return area;
 }
 
+function isMotorEnabled(transport) {
+  return Boolean(transport.motorEnabled);
+}
+
 function idleActualSpeed(transport) {
-  return transport.isPlaying ? transport.targetGlobalSpeed : 0;
+  return isMotorEnabled(transport) ? transport.motorTargetSpeed : 0;
+}
+
+function resolveMotionSource(transport) {
+  if (transport.handGrabActive) {
+    return "hand";
+  }
+
+  if (isMotorEnabled(transport) || transport.ramp) {
+    return "motor";
+  }
+
+  return "idle";
+}
+
+function canStartVoices(transport) {
+  return Boolean(transport.handGrabActive || isMotorEnabled(transport));
+}
+
+function syncTransportCompatibilityFields(transport) {
+  transport.targetGlobalSpeed = transport.motorTargetSpeed;
+  transport.isPlaying = isMotorEnabled(transport);
+  transport.isPaused = !transport.isPlaying;
+  transport.handGrabActive = Boolean(transport.handGrabActive);
+  transport.canStartVoices = canStartVoices(transport);
+  transport.motionSource = resolveMotionSource(transport);
+
+  return transport;
 }
 
 export function createTransport(config = {}) {
@@ -155,12 +186,18 @@ export function createTransport(config = {}) {
     throw new RangeError("globalSpeedMin must be less than globalSpeedMax.");
   }
 
+  const motorTargetSpeed = clamp(
+    defaultTargetGlobalSpeed,
+    globalSpeedMin,
+    globalSpeedMax
+  );
   const transport = {
-    targetGlobalSpeed: clamp(
-      defaultTargetGlobalSpeed,
-      globalSpeedMin,
-      globalSpeedMax
-    ),
+    targetGlobalSpeed: motorTargetSpeed,
+    motorTargetSpeed,
+    motorEnabled: Boolean(defaultIsPlaying),
+    handGrabActive: false,
+    canStartVoices: Boolean(defaultIsPlaying),
+    motionSource: Boolean(defaultIsPlaying) ? "motor" : "idle",
     actualGlobalSpeed: 0,
     phaseTurns: normalizePhaseTurns(defaultPhaseTurns),
     isPlaying: Boolean(defaultIsPlaying),
@@ -180,7 +217,7 @@ export function createTransport(config = {}) {
 
   transport.actualGlobalSpeed = idleActualSpeed(transport);
 
-  return transport;
+  return syncTransportCompatibilityFields(transport);
 }
 
 export function scheduleTransportRamp(transport, ramp) {
@@ -198,14 +235,14 @@ export function scheduleTransportRamp(transport, ramp) {
     transport.actualGlobalSpeed = scheduledRamp.toSpeed;
     transport.ramp = null;
     transport.isRamping = false;
-    return transport;
+    return syncTransportCompatibilityFields(transport);
   }
 
   transport.actualGlobalSpeed = scheduledRamp.fromSpeed;
   transport.ramp = scheduledRamp;
   transport.isRamping = true;
 
-  return transport;
+  return syncTransportCompatibilityFields(transport);
 }
 
 export function setTargetGlobalSpeed(transport, speed, nowSeconds) {
@@ -215,13 +252,14 @@ export function setTargetGlobalSpeed(transport, speed, nowSeconds) {
 
   assertFiniteNumber(speed, "speed");
 
-  transport.targetGlobalSpeed = clamp(
+  transport.motorTargetSpeed = clamp(
     speed,
     transport.globalSpeedMin,
     transport.globalSpeedMax
   );
+  transport.targetGlobalSpeed = transport.motorTargetSpeed;
 
-  if (transport.ramp && transport.isPlaying) {
+  if (transport.ramp && isMotorEnabled(transport)) {
     const currentSeconds =
       transport.lastUpdateSeconds ?? transport.ramp.startSeconds;
     const remainingSeconds = Math.max(
@@ -232,32 +270,31 @@ export function setTargetGlobalSpeed(transport, speed, nowSeconds) {
     scheduleTransportRamp(transport, {
       type: transport.ramp.type,
       fromSpeed: transport.actualGlobalSpeed,
-      toSpeed: transport.targetGlobalSpeed,
+      toSpeed: transport.motorTargetSpeed,
       startSeconds: currentSeconds,
       durationSeconds: remainingSeconds
     });
-  } else if (transport.isPlaying) {
-    transport.actualGlobalSpeed = transport.targetGlobalSpeed;
+  } else if (isMotorEnabled(transport)) {
+    transport.actualGlobalSpeed = transport.motorTargetSpeed;
   } else if (!transport.ramp) {
     transport.actualGlobalSpeed = 0;
   }
 
-  return transport;
+  return syncTransportCompatibilityFields(transport);
 }
 
 export function requestPause(transport, nowSeconds) {
   const resolvedNowSeconds = resolveNowSeconds(nowSeconds);
 
   updateTransport(transport, resolvedNowSeconds);
-  transport.isPlaying = false;
-  transport.isPaused = true;
+  transport.motorEnabled = false;
 
   if (Math.abs(transport.actualGlobalSpeed) <= 0.000001) {
     transport.actualGlobalSpeed = 0;
     transport.ramp = null;
     transport.isRamping = false;
     transport.lastUpdateSeconds = resolvedNowSeconds;
-    return transport;
+    return syncTransportCompatibilityFields(transport);
   }
 
   scheduleTransportRamp(transport, {
@@ -269,7 +306,7 @@ export function requestPause(transport, nowSeconds) {
   });
   transport.lastUpdateSeconds = resolvedNowSeconds;
 
-  return transport;
+  return syncTransportCompatibilityFields(transport);
 }
 
 export function requestStop(transport, nowSeconds) {
@@ -280,30 +317,29 @@ export function requestResume(transport, nowSeconds) {
   const resolvedNowSeconds = resolveNowSeconds(nowSeconds);
 
   updateTransport(transport, resolvedNowSeconds);
-  transport.isPlaying = true;
-  transport.isPaused = false;
+  transport.motorEnabled = true;
 
   if (
-    Math.abs(transport.actualGlobalSpeed - transport.targetGlobalSpeed) <=
+    Math.abs(transport.actualGlobalSpeed - transport.motorTargetSpeed) <=
     0.000001
   ) {
-    transport.actualGlobalSpeed = transport.targetGlobalSpeed;
+    transport.actualGlobalSpeed = transport.motorTargetSpeed;
     transport.ramp = null;
     transport.isRamping = false;
     transport.lastUpdateSeconds = resolvedNowSeconds;
-    return transport;
+    return syncTransportCompatibilityFields(transport);
   }
 
   scheduleTransportRamp(transport, {
     type: "resume",
     fromSpeed: transport.actualGlobalSpeed,
-    toSpeed: transport.targetGlobalSpeed,
+    toSpeed: transport.motorTargetSpeed,
     startSeconds: resolvedNowSeconds,
     durationSeconds: transport.resumeAccelerationSeconds
   });
   transport.lastUpdateSeconds = resolvedNowSeconds;
 
-  return transport;
+  return syncTransportCompatibilityFields(transport);
 }
 
 export function setPlaying(transport, isPlaying, nowSeconds) {
@@ -324,7 +360,7 @@ export function updateTransport(transport, nowSeconds) {
     } else {
       transport.actualGlobalSpeed = idleActualSpeed(transport);
     }
-    return transport;
+    return syncTransportCompatibilityFields(transport);
   }
 
   const elapsedSeconds = Math.max(
@@ -364,13 +400,13 @@ export function updateTransport(transport, nowSeconds) {
     transport.isRamping = false;
   }
 
-  if (!transport.isPlaying && !transport.ramp) {
+  if (!isMotorEnabled(transport) && !transport.ramp) {
     transport.actualGlobalSpeed = 0;
   }
 
   transport.lastUpdateSeconds = resolvedNowSeconds;
 
-  return transport;
+  return syncTransportCompatibilityFields(transport);
 }
 
 export function getTransportSnapshot(transport, nowSeconds) {
@@ -378,6 +414,11 @@ export function getTransportSnapshot(transport, nowSeconds) {
 
   return Object.freeze({
     targetGlobalSpeed: transport.targetGlobalSpeed,
+    motorTargetSpeed: transport.motorTargetSpeed,
+    motorEnabled: transport.motorEnabled,
+    handGrabActive: transport.handGrabActive,
+    canStartVoices: transport.canStartVoices,
+    motionSource: transport.motionSource,
     actualGlobalSpeed: transport.actualGlobalSpeed,
     phaseTurns: transport.phaseTurns,
     isPlaying: transport.isPlaying,
@@ -399,6 +440,11 @@ export function createInitialTransportState() {
     isPaused: transport.isPaused,
     isRamping: transport.isRamping,
     targetGlobalSpeed: transport.targetGlobalSpeed,
+    motorTargetSpeed: transport.motorTargetSpeed,
+    motorEnabled: transport.motorEnabled,
+    handGrabActive: transport.handGrabActive,
+    canStartVoices: transport.canStartVoices,
+    motionSource: transport.motionSource,
     actualGlobalSpeed: transport.actualGlobalSpeed,
     phaseTurns: transport.phaseTurns,
     baseRevolutionSeconds: transport.baseRevolutionSeconds,
