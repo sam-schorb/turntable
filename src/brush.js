@@ -272,6 +272,15 @@ export function stampBrush(
     const strength = isErase
       ? 0
       : coverageStrength(Math.sqrt(distanceSquared), brushRadius);
+    const storedStrength = colourIndex === 0 ? 0 : strength;
+    const index = row * score.angleColumns + column;
+
+    if (
+      score.colours[index] === colourIndex &&
+      score.strengths[index] === storedStrength
+    ) {
+      return;
+    }
 
     setCellUnchecked(score, column, row, colourIndex, strength);
     affectedCells.push({

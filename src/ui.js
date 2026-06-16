@@ -1,7 +1,5 @@
 import {
   getAudioEngineState,
-  sendPlayheadDescriptors,
-  sendTransportSnapshot,
   setLoopDefaults,
   syncAllSampleSlots,
   syncSampleSlot,
@@ -12,22 +10,26 @@ import { clientPointToDiscPoint } from './geometry.js';
 import { createLoopState, getLoopStateSnapshot } from './loop-state.js';
 import {
   beginStroke,
-  cancelStroke,
   clearPaint,
   clearPaintToolSelection,
   consumeDirtyRegions,
   createPaintController,
-  endStroke,
   setSelectedColour,
   setTool,
   tickStroke,
-  updateStroke,
 } from './paint.js';
 import {
-  analyzePlayhead,
   createPlayheadAnalyzer,
-  invalidateDescriptors,
 } from './playhead-analyzer.js';
+import {
+  clearPointerEditQueue,
+  createPointerEditQueue,
+  enqueuePointerCancel,
+  enqueuePointerEnd,
+  enqueuePointerMove,
+  getPointerEventSamples,
+  processPointerEditQueue,
+} from './pointer-edit-queue.js';
 import {
   createRenderer,
   renderTurntable,
@@ -41,9 +43,13 @@ import {
 import {
   createScoreSync,
   selectSyncMode,
-  syncDescriptorSnapshot,
-  syncDirtyRegions,
 } from './score-sync.js';
+import {
+  createReaderEngine,
+  destroyReaderEngine,
+  invalidateReader,
+  runReaderEngine,
+} from './reader-engine.js';
 import { getVisiblePlayheadSegment } from './sensor-geometry.js';
 import {
   getTransportSnapshot,
@@ -58,7 +64,6 @@ import {
   handleSampleReplacement,
   handleScoreCleared,
   reconcileDescriptors,
-  recoverVoicesFromCurrentDescriptors,
 } from './voice-manager.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -68,6 +73,7 @@ const DISC_BOUNDARY_WIDTH = 1.5;
 const CENTER_BUTTON_FILL = '#8000ff';
 const PLAYHEAD_STROKE = 'rgba(0, 255, 128, 0.58)';
 const PLAYHEAD_CORE = '#8000ff';
+const READER_INTERVAL_MS = 8;
 
 function createElement(tagName, options = {}) {
   const element = document.createElement(tagName);
@@ -822,17 +828,24 @@ export function mountAppShell(root, context) {
     canvas,
     getGeometry: () => renderer.geometry,
   });
+  const readerEngine = createReaderEngine({
+    analyzer: playheadAnalyzer,
+    scoreSync,
+    audioEngine,
+    voiceManager,
+    getGeometry: () => renderer.geometry,
+    scope: window,
+    onVoiceStateChange: (voiceState) => {
+      updatePaintControlsIfNeeded(false, voiceState);
+    },
+  });
+  const pointerEditQueue = createPointerEditQueue();
   let animationFrameId = null;
+  let readerIntervalId = null;
   let audioUnlockPromise = null;
   let lastRenderedKey = null;
   let lastPaintControlsSignature = null;
   let lastTransportControlsSignature = null;
-
-  function getCurrentDescriptorPayload(snapshot) {
-    return renderer.geometry
-      ? analyzePlayhead(playheadAnalyzer, snapshot)
-      : playheadAnalyzer.lastPayload;
-  }
 
   function updateTransportDataset(snapshot) {
     canvas.dataset.transportPhase = snapshot.phaseTurns.toFixed(6);
@@ -950,42 +963,97 @@ export function mountAppShell(root, context) {
     return createRenderedKey(snapshot) !== lastRenderedKey;
   }
 
-  function shouldAnalyzeFrame(snapshot, dirtyRegions, audioState) {
-    if (audioState.status !== 'ready') {
-      return false;
+  function createFrameState(frameNow) {
+    return {
+      nowSeconds: frameNow,
+      pointerInput: null,
+      snapshot: null,
+      dirtyRegions: [],
+      audioState: null,
+      descriptorPayload: null,
+      voiceState: null,
+    };
+  }
+
+  function flushQueuedPointerEdits(frameNow, options = {}) {
+    return processPointerEditQueue(pointerEditQueue, paintController, frameNow, {
+      maxOperations:
+        options.maxOperations === undefined
+          ? pointerEditQueue.maxOperationsPerFrame
+          : options.maxOperations,
+    });
+  }
+
+  function processPendingEdits(frame) {
+    frame.pointerInput = flushQueuedPointerEdits(frame.nowSeconds);
+
+    if (paintController.activeStroke && !frame.pointerInput.hasBacklog) {
+      tickStroke(paintController, frame.nowSeconds);
     }
 
-    return (
-      snapshot.isPlaying ||
-      snapshot.isRamping ||
-      dirtyRegions.length > 0 ||
-      playheadAnalyzer.dirty ||
-      getVoiceState(voiceManager).activeVoiceCount > 0
-    );
+    frame.dirtyRegions = consumeDirtyRegions(paintController);
+
+    if (frame.dirtyRegions.length > 0) {
+      invalidateReader(readerEngine, frame.dirtyRegions);
+    }
+
+    return frame;
+  }
+
+  function advanceMotion(frame) {
+    frame.snapshot = getTransportSnapshot(transport, frame.nowSeconds);
+    frame.audioState = getAudioEngineState(audioEngine);
+    updateTransportDataset(frame.snapshot);
+
+    return frame;
+  }
+
+  function renderVisual(frame) {
+    if (shouldRenderVisualFrame(frame.snapshot, frame.dirtyRegions)) {
+      updateTurntableVectorPhase(
+        vectorChrome,
+        renderer.geometry,
+        frame.snapshot.phaseTurns
+      );
+      renderTurntable(renderer, {
+        score,
+        transport: frame.snapshot,
+        dirtyRegions: frame.dirtyRegions,
+      });
+      lastRenderedKey = createRenderedKey(frame.snapshot);
+    }
+
+    return frame;
+  }
+
+  function updateUiState(frame) {
+    updateTransportControlsIfNeeded(frame.snapshot);
+    if (
+      frame.voiceState ||
+      frame.dirtyRegions.length > 0 ||
+      paintController.activeStroke
+    ) {
+      updatePaintControlsIfNeeded(
+        false,
+        frame.voiceState || getVoiceState(voiceManager)
+      );
+    }
+
+    return frame;
   }
 
   function reconcileCurrentVisualState({ recover = false } = {}) {
-    const snapshot = getTransportSnapshot(transport, nowSeconds());
-    const descriptorPayload = getCurrentDescriptorPayload(snapshot);
+    const currentNow = nowSeconds();
+    const snapshot = getTransportSnapshot(transport, currentNow);
+    const result = runReaderEngine(readerEngine, {
+      snapshot,
+      nowSeconds: currentNow,
+      audioState: getAudioEngineState(audioEngine),
+      force: true,
+      recover,
+    });
 
-    if (
-      descriptorPayload &&
-      getAudioEngineState(audioEngine).status === 'ready'
-    ) {
-      sendTransportSnapshot(audioEngine, snapshot);
-      sendPlayheadDescriptors(audioEngine, descriptorPayload);
-      if (recover) {
-        recoverVoicesFromCurrentDescriptors(
-          voiceManager,
-          descriptorPayload,
-          snapshot
-        );
-      } else {
-        reconcileDescriptors(voiceManager, descriptorPayload, snapshot);
-      }
-    }
-
-    return { snapshot, descriptorPayload };
+    return { snapshot, descriptorPayload: result.descriptorPayload };
   }
 
   async function recoverAudioAfterInterruption() {
@@ -1043,66 +1111,27 @@ export function mountAppShell(root, context) {
     return audioUnlockPromise;
   }
 
-  function renderFrame() {
-    const frameNow = nowSeconds();
-
-    if (paintController.activeStroke) {
-      tickStroke(paintController, frameNow);
-    }
-
-    const snapshot = getTransportSnapshot(transport, frameNow);
-    const dirtyRegions = consumeDirtyRegions(paintController);
-    const audioState = getAudioEngineState(audioEngine);
-    let voiceState = null;
-
-    if (dirtyRegions.length > 0) {
-      syncDirtyRegions(scoreSync, dirtyRegions);
-      invalidateDescriptors(playheadAnalyzer, dirtyRegions);
-    }
-
-    updateTransportDataset(snapshot);
-
-    const shouldAnalyzeAudio = shouldAnalyzeFrame(
+  function runReaderTick() {
+    const currentNow = nowSeconds();
+    const snapshot = getTransportSnapshot(transport, currentNow);
+    const result = runReaderEngine(readerEngine, {
       snapshot,
-      dirtyRegions,
-      audioState
-    );
-    const descriptorPayload = shouldAnalyzeAudio
-      ? getCurrentDescriptorPayload(snapshot)
-      : null;
+      nowSeconds: currentNow,
+      audioState: getAudioEngineState(audioEngine),
+    });
 
-    if (shouldAnalyzeAudio && descriptorPayload) {
-      syncDescriptorSnapshot(scoreSync, descriptorPayload);
-      sendTransportSnapshot(audioEngine, snapshot);
-      sendPlayheadDescriptors(audioEngine, descriptorPayload);
-      voiceState = reconcileDescriptors(
-        voiceManager,
-        descriptorPayload,
-        snapshot
-      );
+    if (result.voiceState) {
+      updatePaintControlsIfNeeded(false, result.voiceState);
     }
+  }
 
-    if (shouldRenderVisualFrame(snapshot, dirtyRegions)) {
-      updateTurntableVectorPhase(
-        vectorChrome,
-        renderer.geometry,
-        snapshot.phaseTurns
-      );
-      renderTurntable(renderer, {
-        score,
-        transport: snapshot,
-        dirtyRegions,
-      });
-      lastRenderedKey = createRenderedKey(snapshot);
-    }
+  function renderFrame() {
+    const frame = createFrameState(nowSeconds());
 
-    updateTransportControlsIfNeeded(snapshot);
-    if (voiceState || dirtyRegions.length > 0 || paintController.activeStroke) {
-      updatePaintControlsIfNeeded(
-        false,
-        voiceState || getVoiceState(voiceManager)
-      );
-    }
+    processPendingEdits(frame);
+    advanceMotion(frame);
+    renderVisual(frame);
+    updateUiState(frame);
     animationFrameId = requestAnimationFrame(renderFrame);
   }
 
@@ -1154,6 +1183,7 @@ export function mountAppShell(root, context) {
     updatePaintControlsIfNeeded(true);
   });
   paintControls.clearButton.addEventListener('click', () => {
+    flushQueuedPointerEdits(nowSeconds(), { maxOperations: Infinity });
     clearPaint(paintController);
     handleScoreCleared(voiceManager);
     updatePaintControlsIfNeeded(true);
@@ -1189,6 +1219,9 @@ export function mountAppShell(root, context) {
 
   if (pointerEventsSupported) {
     canvas.addEventListener('pointerdown', event => {
+      const eventNow = nowSeconds();
+
+      clearPointerEditQueue(pointerEditQueue, event.pointerId);
       const result = beginStroke(
         paintController,
         {
@@ -1197,7 +1230,7 @@ export function mountAppShell(root, context) {
           clientY: event.clientY,
           canvas,
         },
-        nowSeconds()
+        eventNow
       );
 
       if (!result.started) {
@@ -1226,15 +1259,9 @@ export function mountAppShell(root, context) {
       }
 
       event.preventDefault();
-      updateStroke(
-        paintController,
-        {
-          pointerId: event.pointerId,
-          clientX: event.clientX,
-          clientY: event.clientY,
-          canvas,
-        },
-        nowSeconds()
+      enqueuePointerMove(
+        pointerEditQueue,
+        getPointerEventSamples(event, canvas, nowSeconds())
       );
     });
     canvas.addEventListener('pointerup', event => {
@@ -1246,7 +1273,10 @@ export function mountAppShell(root, context) {
       }
 
       event.preventDefault();
-      endStroke(paintController, { pointerId: event.pointerId }, nowSeconds());
+      enqueuePointerEnd(
+        pointerEditQueue,
+        getPointerEventSamples(event, canvas, nowSeconds())
+      );
 
       if (typeof canvas.releasePointerCapture === 'function') {
         try {
@@ -1259,7 +1289,13 @@ export function mountAppShell(root, context) {
       }
     });
     canvas.addEventListener('pointercancel', event => {
-      cancelStroke(paintController, { pointerId: event.pointerId });
+      enqueuePointerCancel(pointerEditQueue, {
+        pointerId: event.pointerId,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        canvas,
+        timeSeconds: nowSeconds(),
+      });
       canvas.dataset.pointerCaptureActive = 'false';
     });
   }
@@ -1283,6 +1319,7 @@ export function mountAppShell(root, context) {
 
   resizeAndRender();
   updatePaintControlsIfNeeded(true);
+  readerIntervalId = window.setInterval(runReaderTick, READER_INTERVAL_MS);
   const defaultLoadPromise = loadDefaultSamples(sampleManager).finally(() => {
     updatePaintControlsIfNeeded(true);
     syncAllSampleSlots(audioEngine);
@@ -1297,6 +1334,7 @@ export function mountAppShell(root, context) {
     paintController,
     playheadAnalyzer,
     scoreSync,
+    readerEngine,
     voiceManager,
     loopState,
     sampleManager,
@@ -1306,6 +1344,10 @@ export function mountAppShell(root, context) {
       if (animationFrameId !== null) {
         cancelAnimationFrame(animationFrameId);
       }
+      if (readerIntervalId !== null) {
+        window.clearInterval(readerIntervalId);
+      }
+      destroyReaderEngine(readerEngine);
       document.removeEventListener(
         'visibilitychange',
         handleVisibilityRecovery

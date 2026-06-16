@@ -110,3 +110,70 @@ export function appendDirtyRegion(queue, region) {
 
   return region;
 }
+
+function mergeEditType(regions) {
+  const editTypes = new Set(regions.map((region) => region.editType));
+
+  return editTypes.size === 1 ? regions[0].editType : "mixed";
+}
+
+function latestScoreVersion(regions) {
+  return regions.reduce(
+    (latest, region) =>
+      Number.isInteger(region.scoreVersion)
+        ? Math.max(latest, region.scoreVersion)
+        : latest,
+    0
+  );
+}
+
+export function mergeDirtyRegions(score, dirtyRegions = []) {
+  assertScoreGrid(score);
+
+  const regions = (Array.isArray(dirtyRegions) ? dirtyRegions : [dirtyRegions])
+    .filter(Boolean);
+
+  if (regions.length <= 1) {
+    return regions;
+  }
+
+  if (regions.some((region) => region.fullScore)) {
+    return [
+      Object.freeze({
+        editType: mergeEditType(regions),
+        minAngleColumn: 0,
+        maxAngleColumn: score.angleColumns - 1,
+        wraps: false,
+        minRadialRow: 0,
+        maxRadialRow: score.radialRows - 1,
+        scoreVersion: latestScoreVersion(regions),
+        fullScore: true
+      })
+    ];
+  }
+
+  const angleRange = createWrappedAngleRange(
+    score,
+    regions.flatMap((region) => [
+      region.minAngleColumn,
+      region.maxAngleColumn
+    ])
+  );
+
+  if (!angleRange) {
+    return [];
+  }
+
+  return [
+    Object.freeze({
+      editType: mergeEditType(regions),
+      minAngleColumn: angleRange.minAngleColumn,
+      maxAngleColumn: angleRange.maxAngleColumn,
+      wraps: angleRange.wraps,
+      minRadialRow: Math.min(...regions.map((region) => region.minRadialRow)),
+      maxRadialRow: Math.max(...regions.map((region) => region.maxRadialRow)),
+      scoreVersion: latestScoreVersion(regions),
+      fullScore: false
+    })
+  ];
+}

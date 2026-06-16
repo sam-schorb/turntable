@@ -14,7 +14,8 @@ import {
 import {
   appendDirtyRegion,
   createDirtyRegion,
-  createFullScoreDirtyRegion
+  createFullScoreDirtyRegion,
+  mergeDirtyRegions
 } from "./dirty-regions.js";
 import { clearScore } from "./score.js";
 import { getTransportSnapshot } from "./transport.js";
@@ -571,7 +572,7 @@ export function consumeDirtyRegions(controller) {
 
   controller.dirtyRegions.length = 0;
 
-  return regions;
+  return mergeDirtyRegions(controller.score, regions);
 }
 
 export function createInitialPaintState() {
