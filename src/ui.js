@@ -55,6 +55,7 @@ import {
 import {
   createReaderEngine,
   destroyReaderEngine,
+  getReaderState,
   invalidateReader,
   runReaderEngine,
 } from './reader-engine.js';
@@ -793,6 +794,13 @@ export function mountAppShell(root, context) {
   canvas.dataset.platterGrabActive = 'false';
   canvas.dataset.platterMotionSpeed = '0.000000';
   canvas.dataset.canvasInteraction = 'none';
+  canvas.dataset.readerBackendMode = 'main';
+  canvas.dataset.readerPending = 'false';
+  canvas.dataset.readerWorkerReady = 'false';
+  canvas.dataset.readerLastReason = 'not_started';
+  canvas.dataset.readerRunCount = '0';
+  canvas.dataset.readerSkippedCount = '0';
+  canvas.dataset.readerWorkerRequestCount = '0';
   const vectorChrome = createTurntableVectorChrome();
   const loopState = createLoopState({
     slotLoopModes: getSampleSlots(sampleManager).map(slot => slot.slotLoopMode),
@@ -852,6 +860,7 @@ export function mountAppShell(root, context) {
     getGeometry: () => renderer.geometry,
     scope: window,
     onVoiceStateChange: (voiceState) => {
+      updateReaderDataset();
       updatePaintControlsIfNeeded(false, voiceState);
     },
   });
@@ -874,6 +883,19 @@ export function mountAppShell(root, context) {
     canvas.dataset.platterMotionSource = snapshot.motionSource || 'idle';
     canvas.dataset.canvasInteraction = activeCanvasInteraction || 'none';
     centerTransportButton.updatePhase(snapshot.phaseTurns);
+  }
+
+  function updateReaderDataset(readerState = getReaderState(readerEngine)) {
+    const backend = readerState.backend || {};
+    const stats = readerState.stats || {};
+
+    canvas.dataset.readerBackendMode = backend.mode || 'main';
+    canvas.dataset.readerPending = backend.workerPending ? 'true' : 'false';
+    canvas.dataset.readerWorkerReady = backend.workerReady ? 'true' : 'false';
+    canvas.dataset.readerLastReason = readerState.lastRunReason || 'not_started';
+    canvas.dataset.readerRunCount = String(stats.runs || 0);
+    canvas.dataset.readerSkippedCount = String(stats.skipped || 0);
+    canvas.dataset.readerWorkerRequestCount = String(stats.workerRequests || 0);
   }
 
   function updateTransportControlsIfNeeded(snapshot, force = false) {
@@ -1128,6 +1150,7 @@ export function mountAppShell(root, context) {
 
     if (frame.dirtyRegions.length > 0) {
       invalidateReader(readerEngine, frame.dirtyRegions);
+      updateReaderDataset();
     }
 
     return frame;
@@ -1185,6 +1208,7 @@ export function mountAppShell(root, context) {
       force: true,
       recover,
     });
+    updateReaderDataset(result.readerState);
 
     return { snapshot, descriptorPayload: result.descriptorPayload };
   }
@@ -1252,6 +1276,7 @@ export function mountAppShell(root, context) {
       nowSeconds: currentNow,
       audioState: getAudioEngineState(audioEngine),
     });
+    updateReaderDataset(result.readerState);
 
     if (result.voiceState) {
       updatePaintControlsIfNeeded(false, result.voiceState);
@@ -1286,6 +1311,7 @@ export function mountAppShell(root, context) {
     });
     lastRenderedKey = createRenderedKey(snapshot);
     updateTransportControlsIfNeeded(snapshot, true);
+    updateReaderDataset();
   }
 
   centerTransportButton.playButton.addEventListener('click', async () => {

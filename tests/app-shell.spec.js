@@ -199,6 +199,76 @@ async function dispatchPointer(canvas, type, point, pointerId = 1, pointerType =
   );
 }
 
+async function dispatchPointerSequenceWithDiagnostics(
+  canvas,
+  events,
+  pointerId = 1,
+  pointerType = "mouse"
+) {
+  return canvas.evaluate(
+    (element, detail) => {
+      const read = () => {
+        const messages = window.__phaseEightAudioDebug?.messages || [];
+        const countMessages = (type) =>
+          messages.filter((message) => message.type === type).length;
+
+        return {
+          phase: Number(element.dataset.transportPhase || 0),
+          motionSpeed: Number(element.dataset.platterMotionSpeed || 0),
+          grabActive: element.dataset.platterGrabActive,
+          readerBackendMode: element.dataset.readerBackendMode,
+          readerPending: element.dataset.readerPending,
+          readerRunCount: Number(element.dataset.readerRunCount || 0),
+          readerSkippedCount: Number(element.dataset.readerSkippedCount || 0),
+          readerWorkerRequestCount: Number(
+            element.dataset.readerWorkerRequestCount || 0
+          ),
+          descriptorMessageCount: countMessages("playheadDescriptors"),
+          transportMessageCount: countMessages("setTransport"),
+          voiceMessageCount:
+            countMessages("startVoice") +
+            countMessages("updateVoice") +
+            countMessages("stopVoice")
+        };
+      };
+      const before = read();
+
+      for (const event of detail.events) {
+        element.dispatchEvent(
+          new PointerEvent(event.type, {
+            pointerId: detail.pointerId,
+            pointerType: detail.pointerType,
+            isPrimary: true,
+            clientX: event.x,
+            clientY: event.y,
+            button: 0,
+            buttons:
+              event.type === "pointerup" || event.type === "pointercancel"
+                ? 0
+                : 1,
+            bubbles: true,
+            cancelable: true
+          })
+        );
+      }
+
+      return {
+        before,
+        after: read()
+      };
+    },
+    {
+      pointerId,
+      pointerType,
+      events: events.map((event) => ({
+        type: event.type,
+        x: event.point.x,
+        y: event.point.y
+      }))
+    }
+  );
+}
+
 async function getCanvasPoint(canvas, xRatio, yRatio) {
   const box = await canvas.boundingBox();
 
@@ -988,6 +1058,67 @@ test("no selected colour canvas drag rotates the platter without painting and un
   await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
   await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
   await expect(canvas).toHaveAttribute("data-transport-playing", "false");
+});
+
+test("manual drag pointermove stays lightweight while diagnostics update", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await installFakePlaybackAudio(page);
+  await page.goto("/");
+
+  const canvas = page.getByTestId("turntable-canvas");
+
+  await clearPaintSelectionWithCanvasBackground(page);
+  await expect(canvas).toHaveAttribute(
+    "data-reader-backend-mode",
+    /^(main|worker)$/
+  );
+  await expect(canvas).toHaveAttribute(
+    "data-reader-pending",
+    /^(true|false)$/
+  );
+
+  const start = await getCanvasPoint(canvas, 0.74, 0.5);
+  const move = await getCanvasPoint(canvas, 0.5, 0.26);
+
+  await dispatchPointer(canvas, "pointerdown", start, 47);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "platter");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "true");
+
+  const diagnostics = await dispatchPointerSequenceWithDiagnostics(
+    canvas,
+    [{ type: "pointermove", point: move }],
+    47
+  );
+
+  expect(diagnostics.after.grabActive).toBe("true");
+  expect(
+    Math.abs(diagnostics.after.phase - diagnostics.before.phase)
+  ).toBeGreaterThan(0.01);
+  expect(Math.abs(diagnostics.after.motionSpeed)).toBeGreaterThan(0);
+  expect(diagnostics.after.readerBackendMode).toMatch(/^(main|worker)$/);
+  expect(diagnostics.after.readerPending).toMatch(/^(true|false)$/);
+  expect(diagnostics.after.readerRunCount).toBe(
+    diagnostics.before.readerRunCount
+  );
+  expect(diagnostics.after.readerSkippedCount).toBe(
+    diagnostics.before.readerSkippedCount
+  );
+  expect(diagnostics.after.readerWorkerRequestCount).toBe(
+    diagnostics.before.readerWorkerRequestCount
+  );
+  expect(diagnostics.after.descriptorMessageCount).toBe(
+    diagnostics.before.descriptorMessageCount
+  );
+  expect(diagnostics.after.transportMessageCount).toBe(
+    diagnostics.before.transportMessageCount
+  );
+  expect(diagnostics.after.voiceMessageCount).toBe(
+    diagnostics.before.voiceMessageCount
+  );
+
+  await dispatchPointer(canvas, "pointerup", move, 47);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
 });
 
 test("platter drag keeps its interaction mode through tool changes and outside-disc moves", async ({ page }) => {
