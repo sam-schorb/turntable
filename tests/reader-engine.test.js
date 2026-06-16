@@ -97,6 +97,25 @@ function setup({ audioEngine = createReadyAudioEngine() } = {}) {
   };
 }
 
+function createManualDragSnapshot(score, angleColumn, overrides = {}) {
+  return {
+    phaseTurns: angleColumnToTurns(score, angleColumn),
+    actualGlobalSpeed: overrides.actualGlobalSpeed ?? 1,
+    isPlaying: false,
+    isRamping: false,
+    isPaused: true,
+    handGrabActive: true,
+    canStartVoices: true,
+    motionSource: "hand",
+    timeSeconds: overrides.timeSeconds ?? 1,
+    ...overrides
+  };
+}
+
+function voiceMessages(audioEngine, type) {
+  return audioEngine.postedMessages.filter((message) => message.type === type);
+}
+
 class FakeReaderWorker {
   constructor() {
     this.messages = [];
@@ -213,6 +232,292 @@ describe("reader engine", () => {
     assert.equal(result.ran, true);
     assert.equal(result.descriptorPayload.descriptors.length, 1);
     assert.equal(getReaderState(reader).lastRunReason, "scheduled");
+  });
+
+  it("starts a voice from positive manual-drag motion while the motor is paused", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    const result = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 1.25
+      }),
+      nowSeconds: 3.1,
+      audioState: { status: "ready" }
+    });
+    const starts = voiceMessages(audioEngine, "startVoice");
+
+    assert.equal(result.ran, true);
+    assert.equal(result.voiceState.activeVoiceCount, 1);
+    assert.equal(starts.length, 1);
+    assert.ok(starts[0].voice.effectivePlaybackRate > 1.24);
+    assert.equal(starts[0].voice.startPhase, "beginning");
+  });
+
+  it("starts reverse manual-drag voices with negative effective playback rate", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: -1.5
+      }),
+      nowSeconds: 3.2,
+      audioState: { status: "ready" }
+    });
+
+    const start = voiceMessages(audioEngine, "startVoice")[0];
+
+    assert.ok(start.voice.effectivePlaybackRate < -1.49);
+    assert.equal(start.voice.startPhase, "end");
+  });
+
+  it("updates manual-drag pitch as hand speed increases", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 0.5,
+        timeSeconds: 4
+      }),
+      nowSeconds: 4,
+      audioState: { status: "ready" }
+    });
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 2,
+        timeSeconds: 4.01
+      }),
+      nowSeconds: 4.01,
+      audioState: { status: "ready" }
+    });
+
+    const starts = voiceMessages(audioEngine, "startVoice");
+    const updates = voiceMessages(audioEngine, "updateVoice");
+
+    assert.equal(starts.length, 1);
+    assert.ok(
+      updates.at(-1).updates.effectivePlaybackRate >
+        starts[0].voice.effectivePlaybackRate
+    );
+  });
+
+  it("does not start a fresh manual-drag voice below the trigger threshold", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    const result = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 0.00001
+      }),
+      nowSeconds: 4.2,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(result.descriptorPayload.descriptors.length, 1);
+    assert.equal(result.voiceState.activeVoiceCount, 0);
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 0);
+  });
+
+  it("updates an existing manual-drag voice on direction reversal instead of retriggering", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 1,
+        timeSeconds: 5
+      }),
+      nowSeconds: 5,
+      audioState: { status: "ready" }
+    });
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: -1,
+        timeSeconds: 5.01
+      }),
+      nowSeconds: 5.01,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 1);
+    assert.ok(
+      voiceMessages(audioEngine, "updateVoice").at(-1).updates
+        .effectivePlaybackRate < 0
+    );
+  });
+
+  it("allows a new manual-drag crossing after descriptor disappearance and re-entry", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 1,
+        timeSeconds: 6
+      }),
+      nowSeconds: 6,
+      audioState: { status: "ready" }
+    });
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 96, {
+        actualGlobalSpeed: 1,
+        timeSeconds: 6.01
+      }),
+      nowSeconds: 6.01,
+      audioState: { status: "ready" }
+    });
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 96, {
+        actualGlobalSpeed: 1,
+        timeSeconds: 6.02
+      }),
+      nowSeconds: 6.02,
+      audioState: { status: "ready" }
+    });
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 1,
+        timeSeconds: 6.03
+      }),
+      nowSeconds: 6.03,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 2);
+    assert.equal(voiceMessages(audioEngine, "stopVoice").length, 1);
+  });
+
+  it("keeps broad continuous manual-drag material as one voice", () => {
+    const { score, audioEngine, reader } = setup();
+
+    for (const angleColumn of [0, 1, 2]) {
+      for (const radialRow of [63, 64, 65]) {
+        setCell(score, angleColumn, radialRow, 1, 255);
+      }
+    }
+
+    const result = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0),
+      nowSeconds: 7,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(result.descriptorPayload.descriptors.length, 1);
+    assert.equal(result.voiceState.activeVoiceCount, 1);
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 1);
+  });
+
+  it("keeps separated same-colour manual-drag material as separate voices", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 40, 1, 255);
+    setCell(score, 0, 90, 1, 255);
+    const result = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0),
+      nowSeconds: 7.1,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(result.descriptorPayload.descriptors.length, 2);
+    assert.equal(result.voiceState.activeVoiceCount, 2);
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 2);
+  });
+
+  it("keeps different colours under manual drag as separate voices", () => {
+    const { score, audioEngine, reader } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    setCell(score, 0, 70, 4, 255);
+    const result = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0),
+      nowSeconds: 7.2,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(result.descriptorPayload.descriptors.length, 2);
+    assert.equal(result.voiceState.activeVoiceCount, 2);
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 2);
+  });
+
+  it("detects a narrow mark swept between reader ticks at the real reader cadence", () => {
+    const { score, audioEngine, reader } = setup();
+    const markColumn = 96;
+
+    setCell(score, markColumn, 64, 1, 255);
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 4,
+        timeSeconds: 8
+      }),
+      nowSeconds: 8,
+      audioState: { status: "ready" }
+    });
+
+    const swept = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 192, {
+        actualGlobalSpeed: 4,
+        timeSeconds: 8.008
+      }),
+      nowSeconds: 8.008,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(swept.descriptorPayload.descriptors.length, 1);
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 1);
+  });
+
+  it("uses signed motion samples to detect a between-tick direction reversal", () => {
+    const { score, audioEngine, reader } = setup();
+    const markColumn = 80;
+    const startPhase = angleColumnToTurns(score, 0);
+    const markPhase = angleColumnToTurns(score, markColumn);
+
+    setCell(score, markColumn, 64, 1, 255);
+    runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: 1,
+        timeSeconds: 9,
+        unwrappedPhaseTurns: startPhase
+      }),
+      nowSeconds: 9,
+      audioState: { status: "ready" }
+    });
+
+    const reversed = runReaderEngine(reader, {
+      snapshot: createManualDragSnapshot(score, 0, {
+        actualGlobalSpeed: -1,
+        timeSeconds: 9.016,
+        unwrappedPhaseTurns: startPhase,
+        motionSamples: [
+          {
+            seconds: 9,
+            phaseTurns: startPhase,
+            unwrappedPhaseTurns: startPhase
+          },
+          {
+            seconds: 9.008,
+            phaseTurns: markPhase,
+            unwrappedPhaseTurns: markPhase
+          },
+          {
+            seconds: 9.016,
+            phaseTurns: startPhase,
+            unwrappedPhaseTurns: startPhase
+          }
+        ]
+      }),
+      nowSeconds: 9.016,
+      audioState: { status: "ready" }
+    });
+
+    assert.equal(reversed.descriptorPayload.descriptors.length, 1);
+    assert.equal(voiceMessages(audioEngine, "startVoice").length, 1);
+    assert.ok(
+      voiceMessages(audioEngine, "startVoice")[0].voice
+        .effectivePlaybackRate < 0
+    );
   });
 
   it("schedules normal analysis on a worker and applies async descriptor results", () => {

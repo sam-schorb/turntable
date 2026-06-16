@@ -278,6 +278,60 @@ async function clearPaintSelectionWithCanvasBackground(page) {
   );
 }
 
+async function waitForDefaultSamplesSynced(page) {
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          window.__phaseEightAudioDebug.messages.filter(
+            (message) => message.type === "setSample"
+          ).length
+      )
+    )
+    .toBeGreaterThanOrEqual(6);
+}
+
+async function getVoiceMessageSummary(page) {
+  return page.evaluate(() => {
+    const messages = window.__phaseEightAudioDebug.messages;
+    const starts = messages.filter((message) => message.type === "startVoice");
+    const updates = messages.filter((message) => message.type === "updateVoice");
+    const stops = messages.filter((message) => message.type === "stopVoice");
+    const descriptorMessages = messages.filter(
+      (message) => message.type === "playheadDescriptors"
+    );
+    const transportMessages = messages.filter(
+      (message) => message.type === "setTransport"
+    );
+
+    return {
+      startCount: starts.length,
+      updateCount: updates.length,
+      stopCount: stops.length,
+      descriptorCount: descriptorMessages.length,
+      latestStart: starts.at(-1)?.voice || null,
+      latestUpdate: updates.at(-1)?.updates || null,
+      latestTransport: transportMessages.at(-1) || null,
+      rates: messages
+        .map((message) => {
+          if (message.type === "startVoice") {
+            return message.voice.effectivePlaybackRate;
+          }
+
+          if (
+            message.type === "updateVoice" &&
+            Number.isFinite(message.updates.effectivePlaybackRate)
+          ) {
+            return message.updates.effectivePlaybackRate;
+          }
+
+          return null;
+        })
+        .filter((rate) => Number.isFinite(rate))
+    };
+  });
+}
+
 test("renders the product turntable without debug chrome or playback startup", async ({ page }) => {
   const consoleErrors = [];
   const pageErrors = [];
@@ -970,6 +1024,89 @@ test("platter drag keeps its interaction mode through tool changes and outside-d
   await dispatchPointer(canvas, "pointerup", outside, 51);
   await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
   await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
+});
+
+test("manual platter drag plays painted material with speed and direction changes", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await installFakePlaybackAudio(page);
+  await page.goto("/");
+
+  const canvas = page.getByTestId("turntable-canvas");
+  const mark = await getCanvasPoint(canvas, 0.5, 0.25);
+
+  await dispatchPointer(canvas, "pointerdown", { x: mark.x - 80, y: mark.y }, 61);
+  for (let step = 1; step <= 12; step += 1) {
+    await dispatchPointer(canvas, "pointermove", {
+      x: mark.x - 80 + (160 * step) / 12,
+      y: mark.y
+    }, 61);
+  }
+  await dispatchPointer(canvas, "pointerup", { x: mark.x + 80, y: mark.y }, 61);
+  await page.waitForTimeout(80);
+
+  await clearPaintSelectionWithCanvasBackground(page);
+
+  const grab = await getCanvasPoint(canvas, 0.74, 0.5);
+  const slowForward = { x: grab.x, y: grab.y - 6 };
+  const fastForward = { x: grab.x, y: grab.y - 34 };
+  const reverse = { x: grab.x, y: grab.y + 20 };
+
+  await dispatchPointer(canvas, "pointerdown", grab, 62);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "platter");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "true");
+  await waitForDefaultSamplesSynced(page);
+
+  await page.waitForTimeout(120);
+  await dispatchPointer(canvas, "pointermove", slowForward, 62);
+  await expect
+    .poll(async () => (await getVoiceMessageSummary(page)).startCount)
+    .toBe(1);
+
+  const afterSlow = await getVoiceMessageSummary(page);
+
+  expect(afterSlow.descriptorCount).toBeGreaterThan(0);
+  expect(afterSlow.latestStart.slotIndex).toBe(0);
+  expect(afterSlow.latestStart.effectivePlaybackRate).toBeGreaterThan(0);
+
+  await page.waitForTimeout(12);
+  await dispatchPointer(canvas, "pointermove", fastForward, 62);
+  await expect
+    .poll(async () => {
+      const summary = await getVoiceMessageSummary(page);
+
+      return summary.rates.some(
+        (rate) => rate > afterSlow.latestStart.effectivePlaybackRate
+      );
+    })
+    .toBe(true);
+
+  await page.waitForTimeout(35);
+  await dispatchPointer(canvas, "pointermove", reverse, 62);
+  await expect
+    .poll(async () => {
+      const summary = await getVoiceMessageSummary(page);
+
+      return summary.rates.some((rate) => rate < 0);
+    })
+    .toBe(true);
+
+  const afterReverse = await getVoiceMessageSummary(page);
+
+  expect(afterReverse.startCount).toBe(1);
+  expect(afterReverse.updateCount).toBeGreaterThan(0);
+
+  await dispatchPointer(canvas, "pointerup", reverse, 62);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
+  await expect(canvas).toHaveAttribute("data-transport-playing", "false");
+  await expect
+    .poll(async () => {
+      const summary = await getVoiceMessageSummary(page);
+      const latestSpeed = summary.latestTransport?.actualGlobalSpeed;
+
+      return Number.isFinite(latestSpeed) ? Math.abs(latestSpeed) : null;
+    })
+    .toBeLessThanOrEqual(0.02);
 });
 
 test("uses the first Play gesture to unlock audio and Pause ramps down without resetting phase", async ({ page }) => {

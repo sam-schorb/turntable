@@ -265,6 +265,27 @@ describe("signed transport phase model", () => {
     assert.equal(snapshot.isPaused, true);
   });
 
+  it("snapshots expose hand motion samples for reader sweep analysis", () => {
+    const transport = createTransport({ defaultPhaseTurns: 0.25 });
+
+    beginPlatterGrab(transport, 0.25, 0);
+    updatePlatterGrab(transport, 0.125, 1);
+    const snapshot = getTransportSnapshot(transport, 1);
+
+    assert.equal(snapshot.timeSeconds, 1);
+    assert.equal(snapshot.handGrabActive, true);
+    assert.equal(snapshot.motionSamples.length, 2);
+    assertNearlyEqual(snapshot.motionSamples[0].unwrappedPhaseTurns, 0.25);
+    assertNearlyEqual(snapshot.motionSamples[1].unwrappedPhaseTurns, 0.375);
+    assertNearlyEqual(snapshot.unwrappedPhaseTurns, 0.375);
+
+    endPlatterGrab(transport, 1);
+    const released = getTransportSnapshot(transport, 1);
+
+    assert.equal(released.handGrabActive, false);
+    assert.deepEqual(released.motionSamples, []);
+  });
+
   it("grab while motor stopped creates non-zero signed platter speed", () => {
     const transport = createTransport();
 

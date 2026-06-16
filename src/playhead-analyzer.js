@@ -305,6 +305,251 @@ function getReaderWindowColumns(score, geometry, region, phaseTurns) {
   return columns;
 }
 
+function normalizeSweepSegments(segments) {
+  if (!Array.isArray(segments)) {
+    return [];
+  }
+
+  return segments
+    .map((segment) => {
+      if (!segment) {
+        return null;
+      }
+
+      const startUnwrappedPhaseTurns = Number.isFinite(
+        segment.startUnwrappedPhaseTurns
+      )
+        ? segment.startUnwrappedPhaseTurns
+        : Number.isFinite(segment.startPhaseTurns)
+          ? segment.startPhaseTurns
+          : null;
+      const endUnwrappedPhaseTurns = Number.isFinite(
+        segment.endUnwrappedPhaseTurns
+      )
+        ? segment.endUnwrappedPhaseTurns
+        : Number.isFinite(segment.endPhaseTurns)
+          ? segment.endPhaseTurns
+          : null;
+
+      if (
+        !Number.isFinite(startUnwrappedPhaseTurns) ||
+        !Number.isFinite(endUnwrappedPhaseTurns) ||
+        Math.abs(endUnwrappedPhaseTurns - startUnwrappedPhaseTurns) <= 0
+      ) {
+        return null;
+      }
+
+      return Object.freeze({
+        startUnwrappedPhaseTurns,
+        endUnwrappedPhaseTurns,
+        minUnwrappedPhaseTurns: Math.min(
+          startUnwrappedPhaseTurns,
+          endUnwrappedPhaseTurns
+        ),
+        maxUnwrappedPhaseTurns: Math.max(
+          startUnwrappedPhaseTurns,
+          endUnwrappedPhaseTurns
+        )
+      });
+    })
+    .filter(Boolean);
+}
+
+function getSweepExpansionTurns(score, geometry, region) {
+  const minimumSensorRadius = Math.max(
+    1,
+    Math.min(
+      geometry.innerPlayableRadius,
+      Number.isFinite(region.endRadius) ? region.endRadius : geometry.innerPlayableRadius
+    )
+  );
+  const angularHalfWidthTurns =
+    Math.asin(Math.min(1, region.halfWidth / minimumSensorRadius)) /
+    (Math.PI * 2);
+
+  return angularHalfWidthTurns + 2 / score.angleColumns;
+}
+
+function addAllColumns(score, columns) {
+  for (let column = 0; column < score.angleColumns; column += 1) {
+    columns.add(column);
+  }
+}
+
+function getSweptWindowColumns(score, geometry, region, segments) {
+  const columns = new Set();
+  const expansionTurns = getSweepExpansionTurns(score, geometry, region);
+
+  for (const segment of segments) {
+    const spanTurns =
+      segment.maxUnwrappedPhaseTurns - segment.minUnwrappedPhaseTurns;
+
+    if (spanTurns + expansionTurns * 2 >= 1) {
+      addAllColumns(score, columns);
+      return Array.from(columns);
+    }
+
+    const firstColumn = Math.floor(
+      (segment.minUnwrappedPhaseTurns - expansionTurns) * score.angleColumns - 2
+    );
+    const lastColumn = Math.ceil(
+      (segment.maxUnwrappedPhaseTurns + expansionTurns) * score.angleColumns + 2
+    );
+
+    for (let column = firstColumn; column <= lastColumn; column += 1) {
+      columns.add(
+        ((column % score.angleColumns) + score.angleColumns) %
+          score.angleColumns
+      );
+    }
+  }
+
+  return Array.from(columns);
+}
+
+function getMeasurementPhasesForSweptColumn(
+  score,
+  angleColumn,
+  segments,
+  expansionTurns
+) {
+  const columnTurns = (angleColumn + 0.5) / score.angleColumns;
+  const phaseByKey = new Map();
+
+  for (const segment of segments) {
+    const firstCopy = Math.floor(
+      segment.minUnwrappedPhaseTurns - columnTurns - expansionTurns
+    ) - 1;
+    const lastCopy = Math.ceil(
+      segment.maxUnwrappedPhaseTurns - columnTurns + expansionTurns
+    ) + 1;
+
+    for (let copyIndex = firstCopy; copyIndex <= lastCopy; copyIndex += 1) {
+      const copiedColumnTurns = columnTurns + copyIndex;
+      const closestUnwrappedPhaseTurns = Math.min(
+        segment.maxUnwrappedPhaseTurns,
+        Math.max(segment.minUnwrappedPhaseTurns, copiedColumnTurns)
+      );
+      const distanceTurns = Math.abs(
+        copiedColumnTurns - closestUnwrappedPhaseTurns
+      );
+
+      if (distanceTurns > expansionTurns) {
+        continue;
+      }
+
+      const phaseTurns = normalizeTurns(closestUnwrappedPhaseTurns);
+      const key = phaseTurns.toFixed(12);
+
+      if (!phaseByKey.has(key)) {
+        phaseByKey.set(key, phaseTurns);
+      }
+    }
+  }
+
+  return Array.from(phaseByKey.values());
+}
+
+function getMeasurementContextForPhase(
+  contextByPhase,
+  score,
+  geometry,
+  region,
+  phaseTurns
+) {
+  const key = phaseTurns.toFixed(12);
+
+  if (!contextByPhase.has(key)) {
+    contextByPhase.set(
+      key,
+      createMeasurementContext(score, geometry, region, phaseTurns)
+    );
+  }
+
+  return contextByPhase.get(key);
+}
+
+function measureScoreCellInSweptSensor({
+  analyzer,
+  geometry,
+  region,
+  angleColumn,
+  radialRow,
+  measurementPhases,
+  contextByPhase
+}) {
+  let bestMeasurement = null;
+
+  for (const phaseTurns of measurementPhases) {
+    const context = getMeasurementContextForPhase(
+      contextByPhase,
+      analyzer.score,
+      geometry,
+      region,
+      phaseTurns
+    );
+    const measurement = measureScoreCellInSensor(
+      context,
+      angleColumn,
+      radialRow
+    );
+
+    if (
+      measurement &&
+      (!bestMeasurement ||
+        measurement.distanceFromCenterLine <
+          bestMeasurement.distanceFromCenterLine)
+    ) {
+      bestMeasurement = measurement;
+    }
+  }
+
+  return bestMeasurement;
+}
+
+function createSweptSensorCellCollector({
+  analyzer,
+  geometry,
+  region,
+  segments
+}) {
+  const expansionTurns = getSweepExpansionTurns(
+    analyzer.score,
+    geometry,
+    region
+  );
+  const contextByPhase = new Map();
+  const phasesByColumn = new Map();
+
+  return (angleColumn, radialRow) => {
+    let measurementPhases = phasesByColumn.get(angleColumn);
+
+    if (!measurementPhases) {
+      measurementPhases = getMeasurementPhasesForSweptColumn(
+        analyzer.score,
+        angleColumn,
+        segments,
+        expansionTurns
+      );
+      phasesByColumn.set(angleColumn, measurementPhases);
+    }
+
+    if (measurementPhases.length === 0) {
+      return null;
+    }
+
+    return measureScoreCellInSweptSensor({
+      analyzer,
+      geometry,
+      region,
+      angleColumn,
+      radialRow,
+      measurementPhases,
+      contextByPhase
+    });
+  };
+}
+
 function collectSensorCellsFromPaintedCells(
   analyzer,
   snapshot,
@@ -348,6 +593,59 @@ function collectSensorCellsFromPaintedCells(
   }
 
   analyzer.lastScanMode = "painted-cells";
+  analyzer.lastCandidateCellCount = analyzer.score.nonEmptyIndices
+    ? analyzer.score.nonEmptyIndices.size
+    : cells.length;
+  return cells;
+}
+
+function collectSweptSensorCellsFromPaintedCells(
+  analyzer,
+  geometry,
+  region,
+  segments,
+  columns
+) {
+  const cells = [];
+  const columnSet = new Set(columns);
+  const cache = getAnalysisCache(analyzer.score, geometry);
+  const measureSweptCell = createSweptSensorCellCollector({
+    analyzer,
+    geometry,
+    region,
+    segments
+  });
+
+  for (const index of getNonEmptyCellIndices(analyzer.score)) {
+    if (!isValidPaintedCell(analyzer.score, index)) {
+      continue;
+    }
+
+    const angleColumn = index % analyzer.score.angleColumns;
+
+    if (!columnSet.has(angleColumn)) {
+      continue;
+    }
+
+    const radialRow = Math.floor(index / analyzer.score.angleColumns);
+    const measurement = measureSweptCell(angleColumn, radialRow);
+
+    if (measurement) {
+      cells.push(
+        createSensorCell(
+          analyzer.score,
+          index,
+          angleColumn,
+          radialRow,
+          measurement,
+          region,
+          cache.rowRadialTs[radialRow]
+        )
+      );
+    }
+  }
+
+  analyzer.lastScanMode = "swept-painted-cells";
   analyzer.lastCandidateCellCount = analyzer.score.nonEmptyIndices
     ? analyzer.score.nonEmptyIndices.size
     : cells.length;
@@ -400,6 +698,53 @@ function collectSensorCellsFromReaderWindow(
   }
 
   analyzer.lastScanMode = "reader-window";
+  analyzer.lastCandidateCellCount = columns.length * analyzer.score.radialRows;
+  return cells;
+}
+
+function collectSweptSensorCellsFromReaderWindow(
+  analyzer,
+  geometry,
+  region,
+  segments,
+  columns
+) {
+  const cells = [];
+  const cache = getAnalysisCache(analyzer.score, geometry);
+  const measureSweptCell = createSweptSensorCellCollector({
+    analyzer,
+    geometry,
+    region,
+    segments
+  });
+
+  for (const angleColumn of columns) {
+    for (let radialRow = 0; radialRow < analyzer.score.radialRows; radialRow += 1) {
+      const index = radialRow * analyzer.score.angleColumns + angleColumn;
+
+      if (!isValidPaintedCell(analyzer.score, index)) {
+        continue;
+      }
+
+      const measurement = measureSweptCell(angleColumn, radialRow);
+
+      if (measurement) {
+        cells.push(
+          createSensorCell(
+            analyzer.score,
+            index,
+            angleColumn,
+            radialRow,
+            measurement,
+            region,
+            cache.rowRadialTs[radialRow]
+          )
+        );
+      }
+    }
+  }
+
+  analyzer.lastScanMode = "swept-reader-window";
   analyzer.lastCandidateCellCount = columns.length * analyzer.score.radialRows;
   return cells;
 }
@@ -519,6 +864,59 @@ export function collectSensorCells(
   );
 }
 
+export function collectSweptSensorCells(
+  analyzer,
+  transportSnapshot,
+  geometryOverride
+) {
+  const snapshot = normalizeTransportSnapshot(transportSnapshot);
+  const geometry = resolveGeometry(analyzer, geometryOverride);
+  const region = getSensorRegion(geometry, analyzer.sensorConfig);
+  const segments = normalizeSweepSegments(snapshot.sweptPhaseSegments);
+
+  if (segments.length === 0) {
+    return collectSensorCells(analyzer, snapshot, geometry);
+  }
+
+  const columns = getSweptWindowColumns(
+    analyzer.score,
+    geometry,
+    region,
+    segments
+  );
+  const paintedCellCount = analyzer.score.nonEmptyIndices
+    ? analyzer.score.nonEmptyIndices.size
+    : Infinity;
+  const candidateCellCount = columns.length * analyzer.score.radialRows;
+
+  if (paintedCellCount === 0) {
+    analyzer.lastScanMode = "empty-score";
+    analyzer.lastCandidateCellCount = 0;
+    return [];
+  }
+
+  if (
+    paintedCellCount > 0 &&
+    paintedCellCount < Math.max(1, candidateCellCount / 8)
+  ) {
+    return collectSweptSensorCellsFromPaintedCells(
+      analyzer,
+      geometry,
+      region,
+      segments,
+      columns
+    );
+  }
+
+  return collectSweptSensorCellsFromReaderWindow(
+    analyzer,
+    geometry,
+    region,
+    segments,
+    columns
+  );
+}
+
 export function computePlayheadIslands(analyzer, sensorCells) {
   return detectIslands(analyzer.score, sensorCells, {
     adjacency: analyzer.config.adjacency
@@ -532,7 +930,10 @@ export function analyzePlayhead(
 ) {
   const snapshot = normalizeTransportSnapshot(transportSnapshot);
   const analysisId = analyzer.analysisId + 1;
-  const sensorCells = collectSensorCells(analyzer, snapshot, geometry);
+  const sensorCells = Array.isArray(snapshot.sweptPhaseSegments) &&
+    snapshot.sweptPhaseSegments.length > 0
+    ? collectSweptSensorCells(analyzer, snapshot, geometry)
+    : collectSensorCells(analyzer, snapshot, geometry);
   const islands = computePlayheadIslands(analyzer, sensorCells);
   const descriptorEntries = computeIslandDescriptorEntries(
     analyzer.score,

@@ -156,6 +156,20 @@ function createHandVelocitySample(seconds, phaseTurns) {
   return { seconds, phaseTurns };
 }
 
+function createMotionSampleSnapshot(sample) {
+  return Object.freeze({
+    seconds: sample.seconds,
+    phaseTurns: normalizePhaseTurns(sample.phaseTurns),
+    unwrappedPhaseTurns: sample.phaseTurns
+  });
+}
+
+function getUnwrappedPhaseTurns(transport) {
+  return Number.isFinite(transport.handUnwrappedPhaseTurns)
+    ? transport.handUnwrappedPhaseTurns
+    : transport.phaseTurns;
+}
+
 function resetHandState(transport) {
   transport.handGrabActive = false;
   transport.handStartAngleTurns = null;
@@ -618,6 +632,7 @@ export function getTransportSnapshot(transport, nowSeconds) {
   updateTransport(transport, nowSeconds);
 
   return Object.freeze({
+    timeSeconds: transport.lastUpdateSeconds,
     targetGlobalSpeed: transport.targetGlobalSpeed,
     motorTargetSpeed: transport.motorTargetSpeed,
     motorEnabled: transport.motorEnabled,
@@ -632,7 +647,11 @@ export function getTransportSnapshot(transport, nowSeconds) {
     rampType: transport.ramp ? transport.ramp.type : null,
     baseRevolutionSeconds: transport.baseRevolutionSeconds,
     audioTime: transport.audioTime,
-    nearZeroSpeedThreshold: transport.nearZeroSpeedThreshold
+    nearZeroSpeedThreshold: transport.nearZeroSpeedThreshold,
+    unwrappedPhaseTurns: getUnwrappedPhaseTurns(transport),
+    motionSamples: transport.handGrabActive
+      ? transport.handVelocitySamples.map(createMotionSampleSnapshot)
+      : []
   });
 }
 

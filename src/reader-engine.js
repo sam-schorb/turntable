@@ -21,6 +21,14 @@ const PHASE_EPSILON = 0.000001;
 const SPEED_EPSILON = 0.000001;
 const WORKER_PATCH_CELL_LIMIT = 180000;
 
+function normalizeTurns(turns) {
+  return ((turns % 1) + 1) % 1;
+}
+
+function shortestTurnDelta(fromTurns, toTurns) {
+  return normalizeTurns(toTurns - fromTurns + 0.5) - 0.5;
+}
+
 function normalizeDirtyRegions(dirtyRegions) {
   return (Array.isArray(dirtyRegions) ? dirtyRegions : [dirtyRegions]).filter(
     Boolean
@@ -74,6 +82,14 @@ function snapshotHasMotion(snapshot) {
   );
 }
 
+function snapshotHasMotionSamples(snapshot) {
+  return Boolean(
+    snapshot &&
+      Array.isArray(snapshot.motionSamples) &&
+      snapshot.motionSamples.length > 1
+  );
+}
+
 function shouldRunReader(reader, snapshot, dirtyRegions, audioState, options) {
   if (options.force || options.recover) {
     return true;
@@ -88,6 +104,10 @@ function shouldRunReader(reader, snapshot, dirtyRegions, audioState, options) {
   }
 
   if (snapshotHasMotion(snapshot)) {
+    return true;
+  }
+
+  if (snapshotHasMotionSamples(snapshot)) {
     return true;
   }
 
@@ -119,6 +139,205 @@ function analyzeReaderSnapshot(reader, snapshot) {
   }
 
   return analyzePlayhead(reader.analyzer, snapshot);
+}
+
+function getSnapshotTimeSeconds(snapshot, fallback) {
+  if (snapshot && Number.isFinite(snapshot.timeSeconds)) {
+    return snapshot.timeSeconds;
+  }
+
+  return Number.isFinite(fallback) ? fallback : null;
+}
+
+function getSnapshotUnwrappedPhaseTurns(snapshot, referencePhaseTurns = null) {
+  if (snapshot && Number.isFinite(snapshot.unwrappedPhaseTurns)) {
+    return snapshot.unwrappedPhaseTurns;
+  }
+
+  if (!snapshot || !Number.isFinite(snapshot.phaseTurns)) {
+    return null;
+  }
+
+  if (Number.isFinite(referencePhaseTurns)) {
+    return (
+      referencePhaseTurns +
+      shortestTurnDelta(referencePhaseTurns, snapshot.phaseTurns)
+    );
+  }
+
+  return snapshot.phaseTurns;
+}
+
+function normalizeMotionSample(sample) {
+  if (!sample || !Number.isFinite(sample.seconds)) {
+    return null;
+  }
+
+  const unwrappedPhaseTurns = Number.isFinite(sample.unwrappedPhaseTurns)
+    ? sample.unwrappedPhaseTurns
+    : Number.isFinite(sample.phaseTurns)
+      ? sample.phaseTurns
+      : null;
+
+  if (!Number.isFinite(unwrappedPhaseTurns)) {
+    return null;
+  }
+
+  return Object.freeze({
+    seconds: sample.seconds,
+    phaseTurns: normalizeTurns(unwrappedPhaseTurns),
+    unwrappedPhaseTurns
+  });
+}
+
+function createPhaseSegment(start, end) {
+  if (
+    !start ||
+    !end ||
+    !Number.isFinite(start.unwrappedPhaseTurns) ||
+    !Number.isFinite(end.unwrappedPhaseTurns)
+  ) {
+    return null;
+  }
+
+  const deltaTurns = end.unwrappedPhaseTurns - start.unwrappedPhaseTurns;
+
+  if (Math.abs(deltaTurns) <= PHASE_EPSILON) {
+    return null;
+  }
+
+  return Object.freeze({
+    startPhaseTurns: normalizeTurns(start.unwrappedPhaseTurns),
+    endPhaseTurns: normalizeTurns(end.unwrappedPhaseTurns),
+    startUnwrappedPhaseTurns: start.unwrappedPhaseTurns,
+    endUnwrappedPhaseTurns: end.unwrappedPhaseTurns,
+    deltaTurns,
+    direction: deltaTurns >= 0 ? 1 : -1,
+    startSeconds: Number.isFinite(start.seconds) ? start.seconds : null,
+    endSeconds: Number.isFinite(end.seconds) ? end.seconds : null
+  });
+}
+
+function createMotionSampleSegments(previousSnapshot, nextSnapshot, nowSeconds) {
+  if (!previousSnapshot || !nextSnapshot || !snapshotHasMotionSamples(nextSnapshot)) {
+    return [];
+  }
+
+  const previousTime = getSnapshotTimeSeconds(previousSnapshot, null);
+  const nextTime = getSnapshotTimeSeconds(nextSnapshot, nowSeconds);
+
+  if (!Number.isFinite(previousTime)) {
+    return [];
+  }
+
+  const previousPhase = getSnapshotUnwrappedPhaseTurns(previousSnapshot);
+
+  if (!Number.isFinite(previousPhase)) {
+    return [];
+  }
+
+  const samples = nextSnapshot.motionSamples
+    .map(normalizeMotionSample)
+    .filter(Boolean)
+    .sort((first, second) => first.seconds - second.seconds);
+  const segments = [];
+  let previousPoint = Object.freeze({
+    seconds: previousTime,
+    phaseTurns: normalizeTurns(previousPhase),
+    unwrappedPhaseTurns: previousPhase
+  });
+
+  for (const sample of samples) {
+    if (sample.seconds <= previousTime + 0.000001) {
+      continue;
+    }
+
+    if (Number.isFinite(nextTime) && sample.seconds > nextTime + 0.000001) {
+      break;
+    }
+
+    const segment = createPhaseSegment(previousPoint, sample);
+
+    if (segment) {
+      segments.push(segment);
+    }
+
+    previousPoint = sample;
+  }
+
+  return segments;
+}
+
+function createEndpointPhaseSegment(previousSnapshot, nextSnapshot, nowSeconds) {
+  if (!previousSnapshot || !nextSnapshot) {
+    return null;
+  }
+
+  const previousPhase = getSnapshotUnwrappedPhaseTurns(previousSnapshot);
+
+  if (!Number.isFinite(previousPhase)) {
+    return null;
+  }
+
+  const nextPhase = getSnapshotUnwrappedPhaseTurns(nextSnapshot, previousPhase);
+
+  if (!Number.isFinite(nextPhase)) {
+    return null;
+  }
+
+  return createPhaseSegment(
+    {
+      seconds: getSnapshotTimeSeconds(previousSnapshot, null),
+      unwrappedPhaseTurns: previousPhase
+    },
+    {
+      seconds: getSnapshotTimeSeconds(nextSnapshot, nowSeconds),
+      unwrappedPhaseTurns: nextPhase
+    }
+  );
+}
+
+function createSweptPhaseSegments(previousSnapshot, nextSnapshot, nowSeconds) {
+  const sampleSegments = createMotionSampleSegments(
+    previousSnapshot,
+    nextSnapshot,
+    nowSeconds
+  );
+
+  if (sampleSegments.length > 0) {
+    return sampleSegments;
+  }
+
+  const endpointSegment = createEndpointPhaseSegment(
+    previousSnapshot,
+    nextSnapshot,
+    nowSeconds
+  );
+
+  return endpointSegment ? [endpointSegment] : [];
+}
+
+function prepareReaderSnapshot(reader, snapshot, nowSeconds) {
+  if (!snapshot) {
+    return snapshot;
+  }
+
+  const timeSeconds = getSnapshotTimeSeconds(snapshot, nowSeconds);
+  const prepared = {
+    ...snapshot,
+    timeSeconds: Number.isFinite(timeSeconds) ? timeSeconds : snapshot.timeSeconds
+  };
+  const segments = createSweptPhaseSegments(
+    reader.latestMotionSnapshot,
+    prepared,
+    nowSeconds
+  );
+
+  if (segments.length > 0) {
+    prepared.sweptPhaseSegments = segments;
+  }
+
+  return Object.freeze(prepared);
 }
 
 function getRegionColumnCount(score, region) {
@@ -655,15 +874,16 @@ export function runReaderEngine(
   } = {}
 ) {
   const regions = normalizeDirtyRegions(dirtyRegions);
+  const readerSnapshot = prepareReaderSnapshot(reader, snapshot, nowSeconds);
 
   if (regions.length > 0) {
     invalidateReader(reader, regions);
   }
 
-  if (!shouldRunReader(reader, snapshot, regions, audioState, { force, recover })) {
+  if (!shouldRunReader(reader, readerSnapshot, regions, audioState, { force, recover })) {
     return createSkippedResult(
       reader,
-      snapshot,
+      readerSnapshot,
       audioState && audioState.status === "ready"
         ? "reader_idle"
         : "audio_not_ready"
@@ -672,7 +892,7 @@ export function runReaderEngine(
 
   if (reader.worker && reader.workerReady && !force && !recover) {
     const scheduledReason = scheduleWorkerAnalysis(reader, {
-      snapshot,
+      snapshot: readerSnapshot,
       nowSeconds,
       force,
       recover
@@ -683,7 +903,7 @@ export function runReaderEngine(
         ran: false,
         pending: true,
         reason: scheduledReason,
-        snapshot,
+        snapshot: readerSnapshot,
         descriptorPayload: reader.latestDescriptorPayload,
         voiceState: reader.latestVoiceState,
         readerState: getReaderState(reader)
@@ -691,7 +911,7 @@ export function runReaderEngine(
     }
   }
 
-  return syncAnalyzeReader(reader, snapshot, {
+  return syncAnalyzeReader(reader, readerSnapshot, {
     nowSeconds,
     recover,
     reason: recover ? "recover" : force ? "force" : "scheduled"
