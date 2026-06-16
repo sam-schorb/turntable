@@ -170,6 +170,31 @@ describe("reader engine", () => {
     assert.equal(startMessages[0].voice.slotIndex, 0);
   });
 
+  it("reconciles paused snapshots when canStartVoices allows starts", () => {
+    const { score, audioEngine, reader, snapshot } = setup();
+
+    setCell(score, 0, 64, 1, 255);
+    const result = runReaderEngine(reader, {
+      snapshot: {
+        ...snapshot,
+        actualGlobalSpeed: 1,
+        isPlaying: false,
+        isPaused: true,
+        canStartVoices: true
+      },
+      nowSeconds: 2.5,
+      audioState: { status: "ready" }
+    });
+    const startMessages = audioEngine.postedMessages.filter(
+      (message) => message.type === "startVoice"
+    );
+
+    assert.equal(result.ran, true);
+    assert.equal(result.descriptorPayload.descriptors.length, 1);
+    assert.equal(result.voiceState.activeVoiceCount, 1);
+    assert.equal(startMessages.length, 1);
+  });
+
   it("runs from signed motion snapshots even without dirty regions", () => {
     const { score, reader, snapshot } = setup();
 

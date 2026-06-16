@@ -41,7 +41,14 @@ function getLoadedSlot(manager, slotIndex) {
   }
 }
 
-function shouldStartNewVoice(transportSnapshot) {
+function canStartNewVoiceFromSnapshot(transportSnapshot) {
+  if (
+    transportSnapshot &&
+    typeof transportSnapshot.canStartVoices === "boolean"
+  ) {
+    return transportSnapshot.canStartVoices;
+  }
+
   return !transportSnapshot || transportSnapshot.isPaused !== true;
 }
 
@@ -289,7 +296,7 @@ export function reconcileDescriptors(
   }
 
   for (const descriptor of reconciliation.unmatchedDescriptors) {
-    if (!shouldStartNewVoice(transportSnapshot)) {
+    if (!canStartNewVoiceFromSnapshot(transportSnapshot)) {
       manager.stats.ignoredDescriptors += 1;
       continue;
     }

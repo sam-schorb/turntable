@@ -186,6 +186,81 @@ describe("voice manager", () => {
     );
   });
 
+  it("updates matched voices through near-zero and reverse motion without retriggering", () => {
+    const { audioEngine, voiceManager } = createManager();
+
+    reconcileDescriptors(
+      voiceManager,
+      snapshot([descriptor({ descriptorId: "a", radialCentre: 0.5 })], 1),
+      { ...forwardTransport, canStartVoices: true }
+    );
+    reconcileDescriptors(
+      voiceManager,
+      snapshot([descriptor({ descriptorId: "a", radialCentre: 0.5 })], 2),
+      {
+        actualGlobalSpeed: 0.001,
+        phaseTurns: 0,
+        isPaused: true,
+        canStartVoices: false
+      }
+    );
+    reconcileDescriptors(
+      voiceManager,
+      snapshot([descriptor({ descriptorId: "a", radialCentre: 0.5 })], 3),
+      { actualGlobalSpeed: -1, phaseTurns: 0, canStartVoices: true }
+    );
+
+    const startMessages = audioEngine.postedMessages.filter(
+      (message) => message.type === "startVoice"
+    );
+    const updateMessages = audioEngine.postedMessages.filter(
+      (message) => message.type === "updateVoice"
+    );
+
+    assert.equal(startMessages.length, 1);
+    assert.equal(updateMessages.length, 2);
+    assert.equal(updateMessages[0].updates.amplitude, 0);
+    assert.equal(updateMessages.at(-1).updates.effectivePlaybackRate, -1);
+    assert.equal(getVoiceState(voiceManager).activeVoiceCount, 1);
+  });
+
+  it("uses canStartVoices false to block new voices even while moving", () => {
+    const { audioEngine, voiceManager } = createManager();
+
+    reconcileDescriptors(
+      voiceManager,
+      snapshot([descriptor({ descriptorId: "blocked" })], 1),
+      {
+        actualGlobalSpeed: 1,
+        isPaused: false,
+        canStartVoices: false,
+        phaseTurns: 0
+      }
+    );
+
+    assert.equal(getVoiceState(voiceManager).activeVoiceCount, 0);
+    assert.equal(audioEngine.postedMessages.length, 0);
+    assert.equal(getVoiceState(voiceManager).stats.ignoredDescriptors, 1);
+  });
+
+  it("uses canStartVoices true to allow new voices from paused snapshots", () => {
+    const { audioEngine, voiceManager } = createManager();
+
+    reconcileDescriptors(
+      voiceManager,
+      snapshot([descriptor({ descriptorId: "manual-drag" })], 1),
+      {
+        actualGlobalSpeed: 1,
+        isPaused: true,
+        canStartVoices: true,
+        phaseTurns: 0
+      }
+    );
+
+    assert.equal(getVoiceState(voiceManager).activeVoiceCount, 1);
+    assert.equal(audioEngine.postedMessages.at(-1).type, "startVoice");
+  });
+
   it("falls back to isPaused when canStartVoices is omitted", () => {
     const { audioEngine, voiceManager } = createManager();
 
