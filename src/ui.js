@@ -31,6 +31,14 @@ import {
   processPointerEditQueue,
 } from './pointer-edit-queue.js';
 import {
+  beginPlatterGesture,
+  cancelPlatterGesture,
+  createPlatterGestureController,
+  endPlatterGesture,
+  getPlatterGestureEventSamples,
+  updatePlatterGesture,
+} from './platter-gesture.js';
+import {
   createRenderer,
   renderTurntable,
   resizeRenderer,
@@ -782,6 +790,9 @@ export function mountAppShell(root, context) {
   });
   canvas.dataset.pointerCaptureRequested = 'false';
   canvas.dataset.pointerCaptureActive = 'false';
+  canvas.dataset.platterGrabActive = 'false';
+  canvas.dataset.platterMotionSpeed = '0.000000';
+  canvas.dataset.canvasInteraction = 'none';
   const vectorChrome = createTurntableVectorChrome();
   const loopState = createLoopState({
     slotLoopModes: getSampleSlots(sampleManager).map(slot => slot.slotLoopMode),
@@ -828,6 +839,11 @@ export function mountAppShell(root, context) {
     canvas,
     getGeometry: () => renderer.geometry,
   });
+  const platterGestureController = createPlatterGestureController({
+    transport,
+    canvas,
+    getGeometry: () => renderer.geometry,
+  });
   const readerEngine = createReaderEngine({
     analyzer: playheadAnalyzer,
     scoreSync,
@@ -846,10 +862,17 @@ export function mountAppShell(root, context) {
   let lastRenderedKey = null;
   let lastPaintControlsSignature = null;
   let lastTransportControlsSignature = null;
+  let activeCanvasInteraction = null;
+  let activeCanvasPointerId = null;
 
   function updateTransportDataset(snapshot) {
     canvas.dataset.transportPhase = snapshot.phaseTurns.toFixed(6);
     canvas.dataset.transportPlaying = snapshot.isPlaying ? 'true' : 'false';
+    canvas.dataset.platterGrabActive = snapshot.handGrabActive ? 'true' : 'false';
+    canvas.dataset.platterMotionSpeed =
+      snapshot.actualGlobalSpeed.toFixed(6);
+    canvas.dataset.platterMotionSource = snapshot.motionSource || 'idle';
+    canvas.dataset.canvasInteraction = activeCanvasInteraction || 'none';
     centerTransportButton.updatePhase(snapshot.phaseTurns);
   }
 
@@ -889,6 +912,10 @@ export function mountAppShell(root, context) {
   }
 
   function clearPaintSelectionFromBackground(event) {
+    if (activeCanvasInteraction) {
+      return;
+    }
+
     if (event.button !== undefined && event.button !== 0) {
       return;
     }
@@ -982,6 +1009,112 @@ export function mountAppShell(root, context) {
           ? pointerEditQueue.maxOperationsPerFrame
           : options.maxOperations,
     });
+  }
+
+  function shouldRouteCanvasPointerToPlatter() {
+    return (
+      paintController.tool === 'none' &&
+      paintController.selectedColourIndex == null
+    );
+  }
+
+  function syncTransportDatasetNow() {
+    updateTransportDataset(getTransportSnapshot(transport, nowSeconds()));
+  }
+
+  function pointerStateFromEvent(event) {
+    return {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      canvas,
+    };
+  }
+
+  function requestCanvasPointerCapture(event) {
+    if (typeof canvas.setPointerCapture !== 'function') {
+      return;
+    }
+
+    canvas.dataset.pointerCaptureRequested = 'true';
+
+    try {
+      canvas.setPointerCapture(event.pointerId);
+      canvas.dataset.pointerCaptureActive = 'true';
+    } catch {
+      canvas.dataset.pointerCaptureActive = 'false';
+    }
+  }
+
+  function releaseCanvasPointerCapture(event) {
+    if (typeof canvas.releasePointerCapture !== 'function') {
+      canvas.dataset.pointerCaptureActive = 'false';
+      return;
+    }
+
+    try {
+      canvas.releasePointerCapture(event.pointerId);
+    } catch {
+      // Synthetic browser-test pointers may not establish native capture.
+    }
+
+    canvas.dataset.pointerCaptureActive = 'false';
+  }
+
+  function sampleTimeForPlatterGesture(sample, fallbackNowSeconds) {
+    const fallback = Number.isFinite(fallbackNowSeconds)
+      ? fallbackNowSeconds
+      : nowSeconds();
+    const sampleTime = Number.isFinite(sample.timeSeconds)
+      ? sample.timeSeconds
+      : fallback;
+    const lastTransportUpdate = Number.isFinite(transport.lastUpdateSeconds)
+      ? transport.lastUpdateSeconds
+      : null;
+
+    return Number.isFinite(lastTransportUpdate)
+      ? Math.max(sampleTime, lastTransportUpdate)
+      : sampleTime;
+  }
+
+  function updatePlatterGestureFromSamples(samples, fallbackNowSeconds) {
+    let lastResult = null;
+
+    for (const sample of samples) {
+      lastResult = updatePlatterGesture(
+        platterGestureController,
+        sample,
+        sampleTimeForPlatterGesture(sample, fallbackNowSeconds)
+      );
+    }
+
+    return lastResult;
+  }
+
+  function endPlatterGestureFromSamples(samples, fallbackNowSeconds) {
+    if (!Array.isArray(samples) || samples.length === 0) {
+      return endPlatterGesture(
+        platterGestureController,
+        null,
+        fallbackNowSeconds
+      );
+    }
+
+    updatePlatterGestureFromSamples(samples.slice(0, -1), fallbackNowSeconds);
+
+    const finalSample = samples.at(-1);
+
+    return endPlatterGesture(
+      platterGestureController,
+      finalSample,
+      sampleTimeForPlatterGesture(finalSample, fallbackNowSeconds)
+    );
+  }
+
+  function clearActiveCanvasInteraction() {
+    activeCanvasInteraction = null;
+    activeCanvasPointerId = null;
+    canvas.dataset.canvasInteraction = 'none';
   }
 
   function processPendingEdits(frame) {
@@ -1222,14 +1355,32 @@ export function mountAppShell(root, context) {
       const eventNow = nowSeconds();
 
       clearPointerEditQueue(pointerEditQueue, event.pointerId);
+
+      if (shouldRouteCanvasPointerToPlatter()) {
+        const result = beginPlatterGesture(
+          platterGestureController,
+          pointerStateFromEvent(event),
+          eventNow
+        );
+
+        syncTransportDatasetNow();
+
+        if (!result.started) {
+          return;
+        }
+
+        activeCanvasInteraction = 'platter';
+        activeCanvasPointerId = event.pointerId;
+        canvas.dataset.canvasInteraction = activeCanvasInteraction;
+        void ensureAudioReadyFromGesture();
+        event.preventDefault();
+        requestCanvasPointerCapture(event);
+        return;
+      }
+
       const result = beginStroke(
         paintController,
-        {
-          pointerId: event.pointerId,
-          clientX: event.clientX,
-          clientY: event.clientY,
-          canvas,
-        },
+        pointerStateFromEvent(event),
         eventNow
       );
 
@@ -1237,66 +1388,104 @@ export function mountAppShell(root, context) {
         return;
       }
 
+      activeCanvasInteraction = 'paint';
+      activeCanvasPointerId = event.pointerId;
+      canvas.dataset.canvasInteraction = activeCanvasInteraction;
       event.preventDefault();
-
-      if (typeof canvas.setPointerCapture === 'function') {
-        canvas.dataset.pointerCaptureRequested = 'true';
-
-        try {
-          canvas.setPointerCapture(event.pointerId);
-          canvas.dataset.pointerCaptureActive = 'true';
-        } catch {
-          canvas.dataset.pointerCaptureActive = 'false';
-        }
-      }
+      requestCanvasPointerCapture(event);
     });
     canvas.addEventListener('pointermove', event => {
-      if (
-        !paintController.activeStroke ||
-        paintController.activeStroke.pointerId !== event.pointerId
-      ) {
+      if (activeCanvasPointerId !== event.pointerId) {
         return;
       }
 
-      event.preventDefault();
-      enqueuePointerMove(
-        pointerEditQueue,
-        getPointerEventSamples(event, canvas, nowSeconds())
-      );
-    });
-    canvas.addEventListener('pointerup', event => {
-      if (
-        !paintController.activeStroke ||
-        paintController.activeStroke.pointerId !== event.pointerId
-      ) {
-        return;
-      }
-
-      event.preventDefault();
-      enqueuePointerEnd(
-        pointerEditQueue,
-        getPointerEventSamples(event, canvas, nowSeconds())
-      );
-
-      if (typeof canvas.releasePointerCapture === 'function') {
-        try {
-          canvas.releasePointerCapture(event.pointerId);
-        } catch {
-          // Synthetic browser-test pointers may not establish native capture.
+      if (activeCanvasInteraction === 'paint') {
+        if (
+          !paintController.activeStroke ||
+          paintController.activeStroke.pointerId !== event.pointerId
+        ) {
+          return;
         }
 
-        canvas.dataset.pointerCaptureActive = 'false';
+        event.preventDefault();
+        enqueuePointerMove(
+          pointerEditQueue,
+          getPointerEventSamples(event, canvas, nowSeconds())
+        );
+        return;
+      }
+
+      if (activeCanvasInteraction === 'platter') {
+        const eventNow = nowSeconds();
+
+        event.preventDefault();
+        updatePlatterGestureFromSamples(
+          getPlatterGestureEventSamples(event, canvas, eventNow),
+          eventNow
+        );
+        syncTransportDatasetNow();
+      }
+    });
+    canvas.addEventListener('pointerup', event => {
+      if (activeCanvasPointerId !== event.pointerId) {
+        return;
+      }
+
+      if (activeCanvasInteraction === 'paint') {
+        if (
+          !paintController.activeStroke ||
+          paintController.activeStroke.pointerId !== event.pointerId
+        ) {
+          return;
+        }
+
+        event.preventDefault();
+        enqueuePointerEnd(
+          pointerEditQueue,
+          getPointerEventSamples(event, canvas, nowSeconds())
+        );
+        releaseCanvasPointerCapture(event);
+        clearActiveCanvasInteraction();
+        return;
+      }
+
+      if (activeCanvasInteraction === 'platter') {
+        const eventNow = nowSeconds();
+
+        event.preventDefault();
+        endPlatterGestureFromSamples(
+          getPlatterGestureEventSamples(event, canvas, eventNow),
+          eventNow
+        );
+        releaseCanvasPointerCapture(event);
+        clearActiveCanvasInteraction();
+        syncTransportDatasetNow();
       }
     });
     canvas.addEventListener('pointercancel', event => {
-      enqueuePointerCancel(pointerEditQueue, {
-        pointerId: event.pointerId,
-        clientX: event.clientX,
-        clientY: event.clientY,
-        canvas,
-        timeSeconds: nowSeconds(),
-      });
-      canvas.dataset.pointerCaptureActive = 'false';
+      if (activeCanvasPointerId !== event.pointerId) {
+        return;
+      }
+
+      if (activeCanvasInteraction === 'paint') {
+        enqueuePointerCancel(pointerEditQueue, {
+          pointerId: event.pointerId,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          canvas,
+          timeSeconds: nowSeconds(),
+        });
+      } else if (activeCanvasInteraction === 'platter') {
+        cancelPlatterGesture(
+          platterGestureController,
+          pointerStateFromEvent(event),
+          nowSeconds()
+        );
+      }
+
+      releaseCanvasPointerCapture(event);
+      clearActiveCanvasInteraction();
+      syncTransportDatasetNow();
     });
   }
 

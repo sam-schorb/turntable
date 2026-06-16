@@ -263,6 +263,21 @@ async function readCenterPlayButtonState(page) {
   });
 }
 
+async function clearPaintSelectionWithCanvasBackground(page) {
+  const canvas = page.getByTestId("turntable-canvas");
+  const backgroundPoint = await getCanvasPoint(canvas, 0.03, 0.03);
+
+  await page.mouse.click(backgroundPoint.x, backgroundPoint.y);
+  await expect(page.getByTestId("paint-controls")).toHaveAttribute(
+    "data-paint-tool",
+    "none"
+  );
+  await expect(page.getByTestId("paint-controls")).toHaveAttribute(
+    "data-selected-colour-index",
+    "none"
+  );
+}
+
 test("renders the product turntable without debug chrome or playback startup", async ({ page }) => {
   const consoleErrors = [];
   const pageErrors = [];
@@ -865,7 +880,9 @@ test("deselects the active paint tool when the app background is clicked", async
   expect(await sampleCanvasPixel(page, samplePoint.x, samplePoint.y)).toEqual(
     before
   );
-  await expect(canvas).toHaveAttribute("data-pointer-capture-requested", "false");
+  await expect(canvas).toHaveAttribute("data-pointer-capture-requested", "true");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
 
   await page.getByTestId("paint-colour-2").click();
   await expect(page.getByTestId("paint-controls")).toHaveAttribute(
@@ -877,6 +894,82 @@ test("deselects the active paint tool when the app background is clicked", async
     "2"
   );
   await expect(page.getByTestId("sample-slot-1")).toHaveClass(/is-selected/);
+});
+
+test("no selected colour canvas drag rotates the platter without painting and unlocks audio", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await installFakePlaybackAudio(page);
+  await page.goto("/");
+
+  const canvas = page.getByTestId("turntable-canvas");
+
+  await clearPaintSelectionWithCanvasBackground(page);
+  await expect(canvas).toHaveAttribute("data-transport-playing", "false");
+  expect(await page.evaluate(() => window.__phaseEightAudioDebug.contextsCreated)).toBe(0);
+
+  const start = await getCanvasPoint(canvas, 0.74, 0.5);
+  const move = await getCanvasPoint(canvas, 0.5, 0.26);
+  const beforePhase = await readTransportPhase(page);
+  const beforePaint = await countCanvasPaintComponents(page);
+
+  await dispatchPointer(canvas, "pointerdown", start, 41);
+  await expect(canvas).toHaveAttribute("data-pointer-capture-requested", "true");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "true");
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "platter");
+  await expect
+    .poll(async () => page.evaluate(() => window.__phaseEightAudioDebug.contextsCreated))
+    .toBe(1);
+
+  await dispatchPointer(canvas, "pointermove", move, 41);
+  const movedPhase = await readTransportPhase(page);
+
+  expect(Math.abs(movedPhase - beforePhase)).toBeGreaterThan(0.01);
+
+  await dispatchPointer(canvas, "pointerup", move, 41);
+  await page.waitForTimeout(80);
+
+  const afterPaint = await countCanvasPaintComponents(page);
+
+  expect(Math.abs(afterPaint.paintedPixelCount - beforePaint.paintedPixelCount)).toBeLessThan(80);
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
+  await expect(canvas).toHaveAttribute("data-transport-playing", "false");
+});
+
+test("platter drag keeps its interaction mode through tool changes and outside-disc moves", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto("/");
+
+  const canvas = page.getByTestId("turntable-canvas");
+
+  await clearPaintSelectionWithCanvasBackground(page);
+
+  const start = await getCanvasPoint(canvas, 0.74, 0.5);
+  const outside = await getCanvasPoint(canvas, 1.08, 0.2);
+  const beforePhase = await readTransportPhase(page);
+
+  await dispatchPointer(canvas, "pointerdown", start, 51);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "platter");
+
+  await page.getByTestId("paint-colour-2").evaluate((button) => button.click());
+  await expect(page.getByTestId("paint-controls")).toHaveAttribute(
+    "data-paint-tool",
+    "paint"
+  );
+  await expect(page.getByTestId("paint-controls")).toHaveAttribute(
+    "data-selected-colour-index",
+    "2"
+  );
+
+  await dispatchPointer(canvas, "pointermove", outside, 51);
+  const movedPhase = await readTransportPhase(page);
+
+  expect(Math.abs(movedPhase - beforePhase)).toBeGreaterThan(0.01);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "platter");
+
+  await dispatchPointer(canvas, "pointerup", outside, 51);
+  await expect(canvas).toHaveAttribute("data-canvas-interaction", "none");
+  await expect(canvas).toHaveAttribute("data-platter-grab-active", "false");
 });
 
 test("uses the first Play gesture to unlock audio and Pause ramps down without resetting phase", async ({ page }) => {
