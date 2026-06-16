@@ -1,5 +1,8 @@
 import { TRANSPORT_CONFIG } from "./config.js";
 
+const DEFAULT_HAND_VELOCITY_SAMPLE_WINDOW_SECONDS = 0.12;
+const DEFAULT_HAND_VELOCITY_MIN_PHASE_DELTA_TURNS = 0.000001;
+
 function assertFiniteNumber(value, name) {
   if (!Number.isFinite(value)) {
     throw new TypeError(`${name} must be a finite number.`);
@@ -16,6 +19,13 @@ export function normalizePhaseTurns(phaseTurns) {
   assertFiniteNumber(phaseTurns, "phaseTurns");
 
   return ((phaseTurns % 1) + 1) % 1;
+}
+
+function shortestTurnDelta(fromAngleTurns, toAngleTurns) {
+  assertFiniteNumber(fromAngleTurns, "fromAngleTurns");
+  assertFiniteNumber(toAngleTurns, "toAngleTurns");
+
+  return normalizePhaseTurns(toAngleTurns - fromAngleTurns + 0.5) - 0.5;
 }
 
 function resolveNowSeconds(nowSeconds) {
@@ -142,6 +152,63 @@ function canStartVoices(transport) {
   return Boolean(transport.handGrabActive || isMotorEnabled(transport));
 }
 
+function createHandVelocitySample(seconds, phaseTurns) {
+  return { seconds, phaseTurns };
+}
+
+function resetHandState(transport) {
+  transport.handGrabActive = false;
+  transport.handStartAngleTurns = null;
+  transport.handPreviousAngleTurns = null;
+  transport.handUnwrappedAngleTurns = null;
+  transport.handPreviousUpdateSeconds = null;
+  transport.handVelocitySamples = [];
+  transport.handUnwrappedPhaseTurns = transport.phaseTurns;
+  transport.handMotorWasEnabled = false;
+
+  return transport;
+}
+
+function appendHandVelocitySample(transport, seconds, phaseTurns) {
+  const samples = transport.handVelocitySamples;
+
+  samples.push(createHandVelocitySample(seconds, phaseTurns));
+
+  const cutoffSeconds = seconds - transport.handVelocitySampleWindowSeconds;
+
+  while (samples.length > 2 && samples[1].seconds <= cutoffSeconds) {
+    samples.shift();
+  }
+}
+
+function resolveHandVelocity(transport) {
+  const samples = transport.handVelocitySamples;
+
+  if (samples.length < 2) {
+    return 0;
+  }
+
+  const first = samples[0];
+  const latest = samples[samples.length - 1];
+  const elapsedSeconds = latest.seconds - first.seconds;
+
+  if (elapsedSeconds <= 0) {
+    return 0;
+  }
+
+  const phaseDeltaTurns = latest.phaseTurns - first.phaseTurns;
+
+  if (Math.abs(phaseDeltaTurns) < transport.handVelocityMinPhaseDeltaTurns) {
+    return 0;
+  }
+
+  return clamp(
+    (phaseDeltaTurns * transport.baseRevolutionSeconds) / elapsedSeconds,
+    transport.globalSpeedMin,
+    transport.globalSpeedMax
+  );
+}
+
 function syncTransportCompatibilityFields(transport) {
   transport.targetGlobalSpeed = transport.motorTargetSpeed;
   transport.isPlaying = isMotorEnabled(transport);
@@ -208,11 +275,24 @@ export function createTransport(config = {}) {
     resumeAccelerationSeconds,
     nearZeroSpeedThreshold:
       config.nearZeroSpeedThreshold ?? TRANSPORT_CONFIG.nearZeroSpeedThreshold,
+    handVelocitySampleWindowSeconds:
+      config.handVelocitySampleWindowSeconds ??
+      DEFAULT_HAND_VELOCITY_SAMPLE_WINDOW_SECONDS,
+    handVelocityMinPhaseDeltaTurns:
+      config.handVelocityMinPhaseDeltaTurns ??
+      DEFAULT_HAND_VELOCITY_MIN_PHASE_DELTA_TURNS,
     baseRevolutionSeconds,
     globalSpeedMin,
     globalSpeedMax,
     lastUpdateSeconds: null,
-    audioTime: null
+    audioTime: null,
+    handStartAngleTurns: null,
+    handPreviousAngleTurns: null,
+    handUnwrappedAngleTurns: null,
+    handPreviousUpdateSeconds: null,
+    handVelocitySamples: [],
+    handUnwrappedPhaseTurns: normalizePhaseTurns(defaultPhaseTurns),
+    handMotorWasEnabled: false
   };
 
   transport.actualGlobalSpeed = idleActualSpeed(transport);
@@ -259,7 +339,10 @@ export function setTargetGlobalSpeed(transport, speed, nowSeconds) {
   );
   transport.targetGlobalSpeed = transport.motorTargetSpeed;
 
-  if (transport.ramp && isMotorEnabled(transport)) {
+  if (transport.handGrabActive) {
+    transport.ramp = null;
+    transport.isRamping = false;
+  } else if (transport.ramp && isMotorEnabled(transport)) {
     const currentSeconds =
       transport.lastUpdateSeconds ?? transport.ramp.startSeconds;
     const remainingSeconds = Math.max(
@@ -276,7 +359,7 @@ export function setTargetGlobalSpeed(transport, speed, nowSeconds) {
     });
   } else if (isMotorEnabled(transport)) {
     transport.actualGlobalSpeed = transport.motorTargetSpeed;
-  } else if (!transport.ramp) {
+  } else if (!transport.ramp && !transport.handGrabActive) {
     transport.actualGlobalSpeed = 0;
   }
 
@@ -288,6 +371,13 @@ export function requestPause(transport, nowSeconds) {
 
   updateTransport(transport, resolvedNowSeconds);
   transport.motorEnabled = false;
+
+  if (transport.handGrabActive) {
+    transport.ramp = null;
+    transport.isRamping = false;
+    transport.lastUpdateSeconds = resolvedNowSeconds;
+    return syncTransportCompatibilityFields(transport);
+  }
 
   if (Math.abs(transport.actualGlobalSpeed) <= 0.000001) {
     transport.actualGlobalSpeed = 0;
@@ -318,6 +408,13 @@ export function requestResume(transport, nowSeconds) {
 
   updateTransport(transport, resolvedNowSeconds);
   transport.motorEnabled = true;
+
+  if (transport.handGrabActive) {
+    transport.ramp = null;
+    transport.isRamping = false;
+    transport.lastUpdateSeconds = resolvedNowSeconds;
+    return syncTransportCompatibilityFields(transport);
+  }
 
   if (
     Math.abs(transport.actualGlobalSpeed - transport.motorTargetSpeed) <=
@@ -352,6 +449,20 @@ export function setPlaying(transport, isPlaying, nowSeconds) {
 
 export function updateTransport(transport, nowSeconds) {
   const resolvedNowSeconds = resolveNowSeconds(nowSeconds);
+
+  if (transport.handGrabActive) {
+    transport.phaseTurns = normalizePhaseTurns(transport.phaseTurns);
+    transport.handUnwrappedPhaseTurns = Number.isFinite(
+      transport.handUnwrappedPhaseTurns
+    )
+      ? transport.handUnwrappedPhaseTurns
+      : transport.phaseTurns;
+    transport.ramp = null;
+    transport.isRamping = false;
+    transport.lastUpdateSeconds = resolvedNowSeconds;
+
+    return syncTransportCompatibilityFields(transport);
+  }
 
   if (transport.lastUpdateSeconds === null) {
     transport.lastUpdateSeconds = resolvedNowSeconds;
@@ -407,6 +518,100 @@ export function updateTransport(transport, nowSeconds) {
   transport.lastUpdateSeconds = resolvedNowSeconds;
 
   return syncTransportCompatibilityFields(transport);
+}
+
+export function beginPlatterGrab(transport, angleTurns, nowSeconds) {
+  const resolvedNowSeconds = resolveNowSeconds(nowSeconds);
+  const normalizedAngleTurns = normalizePhaseTurns(angleTurns);
+
+  updateTransport(transport, resolvedNowSeconds);
+
+  transport.handGrabActive = true;
+  transport.handStartAngleTurns = normalizedAngleTurns;
+  transport.handPreviousAngleTurns = normalizedAngleTurns;
+  transport.handUnwrappedAngleTurns = normalizedAngleTurns;
+  transport.handPreviousUpdateSeconds = resolvedNowSeconds;
+  transport.handUnwrappedPhaseTurns = transport.phaseTurns;
+  transport.handMotorWasEnabled = isMotorEnabled(transport);
+  transport.handVelocitySamples = [
+    createHandVelocitySample(resolvedNowSeconds, transport.handUnwrappedPhaseTurns)
+  ];
+  transport.actualGlobalSpeed = 0;
+  transport.ramp = null;
+  transport.isRamping = false;
+  transport.lastUpdateSeconds = resolvedNowSeconds;
+
+  return syncTransportCompatibilityFields(transport);
+}
+
+export function updatePlatterGrab(transport, angleTurns, nowSeconds) {
+  const resolvedNowSeconds = resolveNowSeconds(nowSeconds);
+  const normalizedAngleTurns = normalizePhaseTurns(angleTurns);
+
+  if (!transport.handGrabActive) {
+    updateTransport(transport, resolvedNowSeconds);
+    return syncTransportCompatibilityFields(transport);
+  }
+
+  updateTransport(transport, resolvedNowSeconds);
+
+  const previousAngleTurns =
+    transport.handPreviousAngleTurns ?? normalizedAngleTurns;
+  const pointerDeltaTurns = shortestTurnDelta(
+    previousAngleTurns,
+    normalizedAngleTurns
+  );
+  const phaseDeltaTurns = -pointerDeltaTurns;
+
+  transport.handUnwrappedAngleTurns =
+    (Number.isFinite(transport.handUnwrappedAngleTurns)
+      ? transport.handUnwrappedAngleTurns
+      : previousAngleTurns) + pointerDeltaTurns;
+  transport.handUnwrappedPhaseTurns =
+    (Number.isFinite(transport.handUnwrappedPhaseTurns)
+      ? transport.handUnwrappedPhaseTurns
+      : transport.phaseTurns) + phaseDeltaTurns;
+  transport.phaseTurns = normalizePhaseTurns(transport.handUnwrappedPhaseTurns);
+  transport.handPreviousAngleTurns = normalizedAngleTurns;
+  transport.handPreviousUpdateSeconds = resolvedNowSeconds;
+  appendHandVelocitySample(
+    transport,
+    resolvedNowSeconds,
+    transport.handUnwrappedPhaseTurns
+  );
+  transport.actualGlobalSpeed = resolveHandVelocity(transport);
+  transport.ramp = null;
+  transport.isRamping = false;
+  transport.lastUpdateSeconds = resolvedNowSeconds;
+
+  return syncTransportCompatibilityFields(transport);
+}
+
+export function endPlatterGrab(transport, nowSeconds) {
+  const resolvedNowSeconds = resolveNowSeconds(nowSeconds);
+
+  if (!transport.handGrabActive) {
+    updateTransport(transport, resolvedNowSeconds);
+    return syncTransportCompatibilityFields(transport);
+  }
+
+  updateTransport(transport, resolvedNowSeconds);
+  resetHandState(transport);
+  transport.ramp = null;
+  transport.isRamping = false;
+  transport.lastUpdateSeconds = resolvedNowSeconds;
+
+  if (isMotorEnabled(transport)) {
+    transport.actualGlobalSpeed = transport.motorTargetSpeed;
+  } else {
+    transport.actualGlobalSpeed = 0;
+  }
+
+  return syncTransportCompatibilityFields(transport);
+}
+
+export function cancelPlatterGrab(transport, nowSeconds) {
+  return endPlatterGrab(transport, nowSeconds);
 }
 
 export function getTransportSnapshot(transport, nowSeconds) {
